@@ -1,0 +1,9 @@
+# `files` in package.json is the whitelist; this only guards against accidents.
+test/
+tsconfig.json
+node_modules/
+*.tgz
+*.log
+.DS_Store
+.github/
+AGENTS.md

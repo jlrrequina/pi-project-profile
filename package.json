@@ -1,0 +1,82 @@
+{
+  "name": "@lenard9191/pi-project-profile",
+  "version": "0.1.0",
+  "description": "Pi coding-agent extension that auto-detects any repository's stack, commands, conventions, CI checks and AGENTS.md/CLAUDE.md-style instruction files, injects a stable <project_profile> section into the system prompt, and verifies the agent's changes after every turn by running the project's own typecheck/lint (and, once confirmed, tests/build) with a bounded self-repair loop. Works for Node/TypeScript, Rust, Go, Python, Ruby, JVM, .NET, Swift, PHP, Elixir, Dart and more. Never writes into the repo.",
+  "type": "module",
+  "license": "MIT",
+  "author": {
+    "name": "John Lenard Requina"
+  },
+  "keywords": [
+    "pi-package",
+    "pi",
+    "pi-extension",
+    "pi-coding-agent",
+    "coding-agent",
+    "ai-agent",
+    "agent-tools",
+    "project-profile",
+    "project-detection",
+    "repository-context",
+    "system-prompt",
+    "verification",
+    "quality-gate",
+    "self-repair",
+    "typecheck",
+    "lint",
+    "test-runner",
+    "monorepo",
+    "AGENTS.md",
+    "developer-tools"
+  ],
+  "homepage": "https://github.com/jlrrequina/pi-project-profile#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/jlrrequina/pi-project-profile.git"
+  },
+  "bugs": {
+    "url": "https://github.com/jlrrequina/pi-project-profile/issues"
+  },
+  "files": [
+    "index.ts",
+    "config.ts",
+    "types.ts",
+    "fs-utils.ts",
+    "detect/",
+    "profile/",
+    "verify/",
+    "scripts/scan.ts",
+    "README.md",
+    "CHANGELOG.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": ">=0.87.0",
+    "@earendil-works/pi-coding-agent": ">=0.87.0",
+    "@earendil-works/pi-tui": ">=0.87.0"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
+    "@earendil-works/pi-tui": "0.87.1",
+    "@types/node": "^24.19.0",
+    "typescript": "^5.9.3"
+  },
+  "scripts": {
+    "check": "tsc -p tsconfig.json",
+    "test": "node --test test/*.test.ts",
+    "scan": "node scripts/scan.ts",
+    "prepublishOnly": "npm run check && npm test"
+  }
+}
