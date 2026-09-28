@@ -16,6 +16,7 @@ import { pruneOutput } from "../verify/prune.ts";
 import { resolveArgv } from "../verify/resolve.ts";
 import { runCommand } from "../verify/run.ts";
 import { scopeCheck, scopeFromScript } from "../verify/scope.ts";
+import { collectChanges, newTracker, peekChanges, snapshotStart, toolPath } from "../verify/changes.ts";
 import { runCheck } from "../verify/gate.ts";
 import { looksLikeDirective } from "../detect/repo.ts";
 import { NODE_BIN_PREFIX, PY_PREFIX } from "../types.ts";
@@ -366,6 +367,43 @@ test("resolveArgv binds node_modules/.bin and python tools at run time", () => {
   const plain = resolveArgv({ ...base, argv: ["/no/such/binary", "a"] });
   assert.ok(plain.missing);
   rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------- config + per-turn plumbing
+test("config: verify.perTurn is off by default, honoured when set, unknown keys reported", () => {
+  assert.equal(config.verify.perTurn, false);
+  const dir = tmp();
+  write(dir, "project-profile/config.json", `{ // comment\n "verify": { "perTurn": true, "maxRepairRounds": 2, "bogus": 1 }, "nope": {} }`);
+  const { config: c, issues } = loadConfig(dir);
+  assert.equal(c.verify.perTurn, true);
+  assert.equal(c.verify.maxRepairRounds, 2);
+  assert.equal(c.verify.enabled, true);
+  assert.deepEqual(issues.sort(), ["unknown config key nope", "unknown config key verify.bogus"]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("peekChanges reports files changed since the prompt snapshot without consuming it; collectChanges still sees them", async () => {
+  const root = tmp();
+  const { execSync } = process.getBuiltinModule("node:child_process") as typeof import("node:child_process");
+  execSync("git init -q && git -c user.name=t -c user.email=t@t commit -q --allow-empty -m init", { cwd: root });
+  write(root, "a.txt", "1");
+  const t = newTracker(root);
+  await snapshotStart(t);
+  assert.deepEqual(await peekChanges(t), []);
+  write(root, "b.txt", "2"); // a bash-style edit (not tool-tracked)
+  const peeked = await peekChanges(t);
+  assert.deepEqual(peeked!.map((f) => f.slice(root.length + 1)), ["b.txt"]);
+  const collected = await collectChanges(t);
+  assert.deepEqual(collected.files.map((f) => f.slice(root.length + 1)), ["b.txt"]);
+  assert.equal(collected.gitDetected, 1);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("toolPath resolves relative and absolute tool arguments, ignores non-strings", () => {
+  assert.equal(toolPath("/repo", "src/a.ts"), "/repo/src/a.ts");
+  assert.equal(toolPath("/repo", "/elsewhere/b.ts"), "/elsewhere/b.ts");
+  assert.equal(toolPath("/repo", ""), undefined);
+  assert.equal(toolPath("/repo", 42), undefined);
 });
 
 // ---------------------------------------------------------------- scoped tests

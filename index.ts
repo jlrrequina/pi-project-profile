@@ -24,7 +24,7 @@ import { realpath, tildify, uniq } from "./fs-utils.ts";
 import { availability, effectiveChecks, renderPromptSection, renderReport, tierAllowed } from "./profile/render.ts";
 import { deleteStored, loadOrDetect, profilePath, pruneProfiles, updateUser } from "./profile/store.ts";
 import type { GateVerdict, ProfileConfig, StoredProfile, Tier } from "./types.ts";
-import { collectChanges, displayPath, newTracker, snapshotStart, trackToolWrite, type ChangeTracker } from "./verify/changes.ts";
+import { collectChanges, displayPath, newTracker, peekChanges, snapshotStart, toolPath, type ChangeTracker } from "./verify/changes.ts";
 import { describeRuns, runGate, type GateHooks } from "./verify/gate.ts";
 import { buildPlan, TIER_ORDER, type PlannedCheck } from "./verify/plan.ts";
 import { logDir, pruneLogs } from "./verify/run.ts";
@@ -59,6 +59,10 @@ interface SessionState {
   stored?: StoredProfile;
   profiles: Map<string, StoredProfile>;
   tracker: ChangeTracker;
+  /** Files written by tools during the current turn (verify.perTurn). */
+  turnFiles: Set<string>;
+  /** A shell tool ran during the current turn: files may have changed outside tool tracking. */
+  turnBash: boolean;
   broken: Map<string, string>;
   notifiedBroken: Set<string>;
   askedThisSession: Set<Tier>;
@@ -207,15 +211,15 @@ export default function projectProfile(pi: ExtensionAPI) {
     return `${head}\nDo not make further code changes now. Reply with a short summary for the user: what is failing, what you tried, your best hypothesis, and what you recommend next. Do not claim the task is complete.`;
   }
 
-  /** Replace earlier failure messages from this prompt with a one-liner to save context. */
-  function supersedeDrafts(ctx: ExtensionContext): SessionBoundaryDraft[] {
+  /** Replace earlier failure / per-turn messages from this prompt with a one-liner to save context. */
+  function supersedeDrafts(ctx: ExtensionContext, kinds: string[] = ["failure", "perturn"]): SessionBoundaryDraft[] {
     const st = s!;
     const drafts: SessionBoundaryDraft[] = [];
     try {
       for (const entry of ctx.sessionManager.getBranch()) {
         if (entry.type !== "custom_message" || entry.customType !== VERIFY_MSG) continue;
         const det = entry.details as { seq?: number; kind?: string } | undefined;
-        if (det?.seq !== st.prompt.seq || det.kind !== "failure") continue;
+        if (det?.seq !== st.prompt.seq || !kinds.includes(det.kind ?? "")) continue;
         if (st.supersededIds.has(entry.id)) continue;
         st.supersededIds.add(entry.id);
         drafts.push({ type: "context_edit", targetId: entry.id, replacement: { content: [{ type: "text", text: "[verification] an earlier check failure in this task was superseded by a later verification run." }] } });
@@ -258,7 +262,7 @@ export default function projectProfile(pi: ExtensionAPI) {
   pi.registerMessageRenderer(VERIFY_MSG, (message, { expanded, outputPad }, theme) => {
     const details = message.details as { kind?: string; headline?: string } | undefined;
     const kind = details?.kind ?? "info";
-    const color = kind === "failure" ? "error" : kind === "giveup" ? "warning" : "success";
+    const color = kind === "failure" ? "error" : kind === "giveup" || kind === "perturn" ? "warning" : "success";
     const head = `${theme.fg(color, "[verify]")} ${details?.headline ?? ""}`;
     const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
     box.addChild(new Text(head, 0, 0));
@@ -290,6 +294,8 @@ export default function projectProfile(pi: ExtensionAPI) {
       gitRoot,
       profiles: new Map(),
       tracker: newTracker(gitRoot),
+      turnFiles: new Set(),
+      turnBash: false,
       broken: new Map(),
       notifiedBroken: new Set(),
       askedThisSession: new Set(),
@@ -333,6 +339,8 @@ export default function projectProfile(pi: ExtensionAPI) {
     if (!s) return;
     // new user prompt → new repair budget
     s.prompt = { seq: s.prompt.seq + 1, repairRound: 0, pendingRepair: false, finalized: false, mustRun: [] };
+    s.turnFiles.clear();
+    s.turnBash = false;
     if (verifyEnabled()) await snapshotStart(s.tracker);
     if (!s.config.profile.inject || !s.stored) return;
     const loaded = (event.systemPromptOptions.contextFiles ?? []).map((f) => f.path);
@@ -348,17 +356,28 @@ export default function projectProfile(pi: ExtensionAPI) {
   // ------------------------------------------------------------------ change tracking
   pi.on("tool_result", async (event, ctx) => {
     if (!s) return;
+    const st = s;
     const name = event.toolName;
+    const track = (path: unknown) => {
+      const p = toolPath(ctx.cwd, path);
+      if (!p) return;
+      st.tracker.tracked.add(p);
+      st.turnFiles.add(p);
+    };
     if (name === "write" || name === "edit") {
-      if (!event.isError) trackToolWrite(s.tracker, ctx.cwd, event.input.path);
+      if (!event.isError) track(event.input.path);
       return;
     }
-    if (name === "bash" || name === "powershell" || name === "hypa_shell" || name === "interactive_shell") s.tracker.bashRan = true;
+    const shell = () => {
+      st.tracker.bashRan = true;
+      st.turnBash = true;
+    };
+    if (name === "bash" || name === "powershell" || name === "hypa_shell" || name === "interactive_shell") shell();
     else if (/edit|write|patch|apply|replace|insert|move|rename|delete|create/i.test(name) && !/read|grep|find|search|list|ls|describe|status/i.test(name)) {
       // third-party mutation tools (hashline editors etc.): path arg if present, else assume unknown changes
-      if (typeof event.input.path === "string") trackToolWrite(s.tracker, ctx.cwd, event.input.path);
-      else if (typeof event.input.file === "string") trackToolWrite(s.tracker, ctx.cwd, event.input.file);
-      else s.tracker.bashRan = true;
+      if (typeof event.input.path === "string") track(event.input.path);
+      else if (typeof event.input.file === "string") track(event.input.file);
+      else shell();
     }
   });
 
@@ -380,7 +399,7 @@ export default function projectProfile(pi: ExtensionAPI) {
           st.prompt.finalized = true;
           setStatus(ctx, "✗ unresolved");
           notify(ctx, "verify: agent made no changes after the last failure — stopping automatic repair", "warning");
-          return { entries: [{ type: "custom_message", customType: VERIFY_MSG, content: "[verification] the previous check failure is still unresolved and no files were changed in the last turn; automatic repair stopped. Do not claim the task is complete.", display: true, details: { seq: st.prompt.seq, kind: "giveup", headline: "no changes since last failure — stopped" } }] };
+          return { entries: [...event.entries, { type: "custom_message", customType: VERIFY_MSG, content: "[verification] the previous check failure is still unresolved and no files were changed in the last turn; automatic repair stopped. Do not claim the task is complete.", display: true, details: { seq: st.prompt.seq, kind: "giveup", headline: "no changes since last failure — stopped" } }] };
         }
         return;
       }
@@ -403,7 +422,8 @@ export default function projectProfile(pi: ExtensionAPI) {
         }
         st.prompt.pendingRepair = false;
         st.prompt.mustRun = [];
-        return drafts.length ? { entries: drafts } : undefined;
+        // Boundary results replace the draft chain: always carry earlier handlers' entries.
+        return drafts.length ? { entries: [...event.entries, ...drafts] } : undefined;
       }
       if (verdict.status === "red") {
         const failingPlanned: PlannedCheck[] = [];
@@ -427,7 +447,7 @@ export default function projectProfile(pi: ExtensionAPI) {
           notify(ctx, `verify: ${stopReason} — ${failingLabels} still failing; see the transcript`, "warning");
           const summarize = st.config.verify.summarizeOnGiveUp;
           drafts.push({ type: "custom_message", customType: VERIFY_MSG, content: giveUpMessage(verdict, stopReason, summarize), display: true, details: { seq: st.prompt.seq, kind: "giveup", headline: `stopped — ${stopReason} (${failingLabels})` } });
-          return { entries: drafts, continue: summarize };
+          return { entries: [...event.entries, ...drafts], continue: summarize };
         }
         st.prompt.repairRound = round;
         st.prompt.lastSignature = verdict.signature;
@@ -436,13 +456,69 @@ export default function projectProfile(pi: ExtensionAPI) {
         debug("repair", { seq: st.prompt.seq, round, failing: failingLabels });
         notify(ctx, `verify: ${failingLabels} failed — sending the agent back (round ${round}/${max})`, "info");
         drafts.push({ type: "custom_message", customType: VERIFY_MSG, content: failureMessage(verdict, round, max), display: true, details: { seq: st.prompt.seq, kind: "failure", headline: `${failingLabels} failed — round ${round}/${max}` } });
-        return { entries: drafts, continue: true };
+        return { entries: [...event.entries, ...drafts], continue: true };
       }
       // env / skipped
       setStatus(ctx, verdict.status === "env" ? "⚠ checks unavailable" : "– nothing to verify");
       return;
     } catch (err) {
       notify(ctx, `verify: internal error — ${(err as Error).message}`, "error");
+      return;
+    } finally {
+      st.gateRunning = false;
+    }
+  });
+
+  // ------------------------------------------------------------------ optional per-turn fast check
+  function perTurnMessage(verdict: GateVerdict): string {
+    const st = s!;
+    const lines: string[] = [];
+    for (const r of verdict.runs.filter((x) => x.status === "fail")) {
+      const where = r.check.cwd === st.root ? "" : ` (in ${displayPath(st.root, r.check.cwd)})`;
+      lines.push(`[verification] fast check after this turn: ✗ ${r.check.label} — \`${r.check.cmd.replace(" <files>", "")}\` exited ${r.exitCode ?? "?"}${where}`);
+      lines.push("```");
+      lines.push(...r.summary.slice(0, Math.max(8, Math.floor(st.config.verify.maxOutputLines / 2))));
+      lines.push("```");
+      if (r.totalLines > r.summary.length && r.logPath) lines.push(`(full log: ${r.logPath})`);
+    }
+    lines.push("Informational: you are mid-task, so failures from work still in progress are expected. Address them as you continue; the full verification runs when you finish and will send a repair request if anything still fails.");
+    return lines.join("\n");
+  }
+
+  pi.on("turn_end", async (event, ctx) => {
+    if (!s || !s.stored || !s.config.verify.perTurn || !verifyEnabled()) return;
+    const st = s;
+    const files = new Set(st.turnFiles);
+    const bash = st.turnBash;
+    st.turnFiles.clear();
+    st.turnBash = false;
+    if (event.outcome !== "completed" || st.gateRunning || !ctx.isProjectTrusted()) return;
+    if (files.size === 0 && !bash) return;
+    st.gateRunning = true;
+    try {
+      // Shell tools may have edited files: peek at git (everything changed since the prompt started) without moving the settle snapshot.
+      if (bash) for (const f of (await peekChanges(st.tracker)) ?? []) files.add(f);
+      if (files.size === 0) return;
+      const plan = await buildGatePlan(Array.from(files).sort(), { unscoped: false });
+      for (const t of TIER_ORDER) if (t !== "syntax" && t !== "fast") plan.byTier.set(t, []);
+      if ((plan.byTier.get("syntax")?.length ?? 0) + (plan.byTier.get("fast")?.length ?? 0) === 0) return;
+      const hooks = makeHooks(ctx, st.abort.signal, { interactive: false });
+      setStatus(ctx, "⏳ fast check…");
+      const verdict = await runGate(plan, st.config, hooks);
+      debug("perturn", { seq: st.prompt.seq, turn: event.turnIndex, files: Array.from(files).sort(), bash, status: verdict.status, ms: verdict.durationMs, runs: verdict.runs.map((r) => ({ id: r.check.id, status: r.status, code: r.exitCode })) });
+      reportEnvFailures(ctx, verdict);
+      if (verdict.status !== "red") {
+        setStatus(ctx, statusText(verdict));
+        return;
+      }
+      const failingLabels = uniq(verdict.runs.filter((r) => r.status === "fail").map((r) => r.check.label)).join(", ");
+      setStatus(ctx, `✗ ${failingLabels} (mid-task)`);
+      const drafts = supersedeDrafts(ctx, ["perturn"]);
+      drafts.push({ type: "custom_message", customType: VERIFY_MSG, content: perTurnMessage(verdict), display: true, details: { seq: st.prompt.seq, kind: "perturn", headline: `${failingLabels} failing after this turn (fast check, informational)` } });
+      // Never `continue` here: the agent is still working and gets the note with its next model request.
+      return { entries: [...event.entries, ...drafts] };
+    } catch (err) {
+      notify(ctx, `verify: per-turn check error — ${(err as Error).message}`, "warning");
       return;
     } finally {
       st.gateRunning = false;

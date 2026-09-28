@@ -149,6 +149,12 @@ export interface ProfileConfig {
     maxOutputLines: number;
     /** After the last failed repair round, ask the agent for a short summary (one extra model call) instead of stopping silently. */
     summarizeOnGiveUp: boolean;
+    /**
+     * Also run the syntax + fast tiers after every turn that wrote files (tool writes only), and append a
+     * non-continuing note when red. Off by default: it adds the check's latency to each such turn, and
+     * multi-file edits are legitimately red half-way through.
+     */
+    perTurn: boolean;
   };
   profile: {
     inject: boolean;
@@ -172,6 +178,7 @@ export const DEFAULT_CONFIG: ProfileConfig = {
     headless: true,
     maxOutputLines: 40,
     summarizeOnGiveUp: true,
+    perTurn: false,
   },
   profile: {
     inject: true,

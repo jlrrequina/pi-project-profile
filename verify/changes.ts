@@ -23,9 +23,15 @@ export function newTracker(gitRoot: string | undefined): ChangeTracker {
   return { gitRoot, tracked: new Set(), bashRan: false };
 }
 
+/** Absolute path for a tool's path argument, or undefined when it is not a usable string. */
+export function toolPath(cwd: string, path: unknown): string | undefined {
+  if (typeof path !== "string" || !path) return undefined;
+  return isAbsolute(path) ? resolve(path) : resolve(cwd, path);
+}
+
 export function trackToolWrite(t: ChangeTracker, cwd: string, path: unknown): void {
-  if (typeof path !== "string" || !path) return;
-  t.tracked.add(isAbsolute(path) ? resolve(path) : resolve(cwd, path));
+  const p = toolPath(cwd, path);
+  if (p) t.tracked.add(p);
 }
 
 function gitStatus(gitRoot: string, signal?: AbortSignal): Promise<Snapshot | undefined> {
@@ -98,6 +104,21 @@ export async function snapshotStart(t: ChangeTracker): Promise<void> {
   t.snapshot = t.gitRoot ? await gitStatus(t.gitRoot) : undefined;
 }
 
+/** Paths (absolute) whose git status/stamp differs between two snapshots. */
+function diffSnapshots(gitRoot: string, before: Snapshot, now: Snapshot): string[] {
+  const out: string[] = [];
+  for (const [rel, v] of now) if (before.get(rel) !== v) out.push(join(gitRoot, rel));
+  for (const rel of before.keys()) if (!now.has(rel)) out.push(join(gitRoot, rel)); // reverted or deleted
+  return out;
+}
+
+/** Files changed since the prompt-start snapshot, without touching the tracker (per-turn checks). */
+export async function peekChanges(t: ChangeTracker): Promise<string[] | undefined> {
+  if (!t.gitRoot || !t.snapshot) return undefined;
+  const now = await gitStatus(t.gitRoot);
+  return now ? diffSnapshots(t.gitRoot, t.snapshot, now).sort() : undefined;
+}
+
 /** Compute changed files (absolute) since the snapshot; also refreshes the snapshot. */
 export async function collectChanges(t: ChangeTracker): Promise<{ files: string[]; gitDetected: number; unknownChanges: boolean }> {
   const files = new Set<string>(t.tracked);
@@ -106,17 +127,9 @@ export async function collectChanges(t: ChangeTracker): Promise<{ files: string[
   if (t.gitRoot) {
     const now = await gitStatus(t.gitRoot);
     if (now && t.snapshot) {
-      for (const [rel, v] of now) {
-        if (t.snapshot.get(rel) !== v) {
-          files.add(join(t.gitRoot, rel));
-          gitDetected++;
-        }
-      }
-      for (const rel of t.snapshot.keys()) {
-        if (!now.has(rel)) {
-          files.add(join(t.gitRoot, rel)); // reverted or deleted
-          gitDetected++;
-        }
+      for (const f of diffSnapshots(t.gitRoot, t.snapshot, now)) {
+        files.add(f);
+        gitDetected++;
       }
       t.snapshot = now;
     } else if (!now || !t.snapshot) {

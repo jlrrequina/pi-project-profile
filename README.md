@@ -68,10 +68,12 @@ Failures come back to the agent pruned (diagnostic lines first, ~40 lines, full 
 
 ```jsonc
 {
-  "verify": { "enabled": true, "maxRepairRounds": 3, "runTests": "ask", "runBuild": "ask", "headless": true, "maxOutputLines": 40 },
+  "verify": { "enabled": true, "maxRepairRounds": 3, "runTests": "ask", "runBuild": "ask", "headless": true, "maxOutputLines": 40, "perTurn": false },
   "profile": { "inject": true, "inlineInstructionFiles": true, "maxInstructionFileChars": 3000 }
 }
 ```
+
+`verify.perTurn` additionally runs the syntax + fast tiers after every turn that changed files and appends a short *informational* note when red (no repair loop: multi-file edits are legitimately red half-way). Off by default because it adds the check's latency to each such turn.
 
 `PI_PROJECT_PROFILE_DEBUG=1` writes a JSONL trace of gate decisions to `$TMPDIR/pi-project-profile/`.
 
