@@ -1,6 +1,6 @@
 import { join } from "node:path";
 import { isExecutable } from "../fs-utils.ts";
-import { PY_PREFIX } from "../types.ts";
+import { PY_PREFIX, type ScopeSpec } from "../types.ts";
 import { pythonDisplay } from "../verify/resolve.ts";
 import type { Builder } from "./context.ts";
 import { parseToolVersions, tomlHasTable, tomlSections } from "./context.ts";
@@ -217,9 +217,9 @@ export function detectPython(b: Builder): void {
   // --- checks ---
   const pyExts = [".py", ".pyi", ".toml", ".cfg", ".ini"];
   const missingHint = (tool: string) => `${tool} not available — run \`${installCmd}\` or install it in the active environment`;
-  const addTool = (id: string, tier: "fast" | "lint" | "test", label: string, tool: string, args: string[], opts: { appendFiles?: boolean; unscopedArgs?: string[]; exts?: string[]; toolFamily?: string; source: string; env?: Record<string, string> }) => {
+  const addTool = (id: string, tier: "fast" | "lint" | "test", label: string, tool: string, args: string[], opts: { appendFiles?: boolean; unscopedArgs?: string[]; exts?: string[]; toolFamily?: string; source: string; env?: Record<string, string>; scope?: ScopeSpec }) => {
     const t = toolArgv(tool);
-    b.check({ id, tier, label, cmd: `${t.cmd} ${args.join(" ")}${opts.appendFiles ? " <files>" : ""}`.replace(/\s+/g, " ").trim(), argv: [...t.argv, ...args], appendFiles: opts.appendFiles, unscopedArgs: opts.unscopedArgs, source: opts.source, exts: opts.exts ?? pyExts, requires: { hint: missingHint(tool) }, tool: opts.toolFamily ?? tool, env: opts.env });
+    b.check({ id, tier, label, cmd: `${t.cmd} ${args.join(" ")}${opts.appendFiles ? " <files>" : ""}`.replace(/\s+/g, " ").trim(), argv: [...t.argv, ...args], appendFiles: opts.appendFiles, unscopedArgs: opts.unscopedArgs, source: opts.source, exts: opts.exts ?? pyExts, requires: { hint: missingHint(tool) }, tool: opts.toolFamily ?? tool, env: opts.env, scope: opts.scope });
   };
   const py = pythonArgv();
   b.check({ id: "py:syntax", tier: "syntax", label: "syntax", cmd: `${py.cmd} -c "ast.parse" <files>`, argv: [...py.argv, "-c", "import ast,sys\nfor f in sys.argv[1:]:\n    ast.parse(open(f,'rb').read(), f)"], appendFiles: true, source: "python ast", exts: [".py"], requires: { hint: "python interpreter not found" }, tool: "python", env: { PYTHONDONTWRITEBYTECODE: "1" } });
@@ -231,6 +231,6 @@ export function detectPython(b: Builder): void {
   } else if (hasFlake8) addTool("py:flake8", "lint", "lint", "flake8", [], { appendFiles: true, unscopedArgs: [], exts: [".py"], source: "flake8 config", toolFamily: "flake8" });
   if (!hasRuff && hasBlack) addTool("py:black", "lint", "format", "black", ["--check", "--diff", "--quiet"], { appendFiles: true, unscopedArgs: ["."], exts: [".py"], source: "black config", toolFamily: "black" });
   if (!hasRuff && hasIsort) addTool("py:isort", "lint", "imports", "isort", ["--check-only", "--diff"], { appendFiles: true, unscopedArgs: ["."], exts: [".py"], source: "isort config", toolFamily: "isort" });
-  if (hasPytest) addTool("py:pytest", "test", "test", "pytest", ["-q", "-x", "-p", "no:cacheprovider", "--color=no"], { source: "pytest", toolFamily: "pytest", env: { PYTHONDONTWRITEBYTECODE: "1" } });
+  if (hasPytest) addTool("py:pytest", "test", "test", "pytest", ["-q", "-x", "-p", "no:cacheprovider", "--color=no"], { source: "pytest", toolFamily: "pytest", env: { PYTHONDONTWRITEBYTECODE: "1" }, scope: { kind: "pytest" } });
   else if (b.hasFile("manage.py")) b.check({ id: "py:django-test", tier: "test", label: "test", cmd: `${py.cmd} manage.py test`, argv: [...py.argv, "manage.py", "test", "--noinput"], source: "Django", exts: pyExts, requires: { hint: "python interpreter not found" }, tool: "django" });
 }

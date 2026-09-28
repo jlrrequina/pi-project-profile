@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { expandDirGlob, hasNodeModules, relTo, uniq } from "../fs-utils.ts";
 import { NODE_BIN_PREFIX } from "../types.ts";
+import { scopeFromScript } from "../verify/scope.ts";
 import type { Builder } from "./context.ts";
 import { parseToolVersions } from "./context.ts";
 
@@ -308,14 +309,17 @@ export function detectNode(b: Builder): void {
   // tests
   const runner = has("vitest") ? "vitest" : has("jest") ? "jest" : has("mocha") ? "mocha" : has("ava") ? "ava" : has("tap") ? "tap" : undefined;
   const testCheck = find(TEST_NAMES, undefined, notWatch);
+  // Scoped form (vitest related / jest --findRelatedTests) when the script is a plain runner invocation.
+  const scopeOf = (body: string) => scopeFromScript(body, (t) => `${NODE_BIN_PREFIX}${t}`, (t) => bin(t, []).cmd);
   if (testCheck) {
-    b.check({ id: "node:test", tier: "test", label: "test", cmd: run(testCheck), argv: runArgv(testCheck), source: `package.json scripts.${testCheck}`, requires, tool: runner ?? "generic", env: { CI: "true" } });
+    const body = scripts[testCheck]!;
+    b.check({ id: "node:test", tier: "test", label: "test", cmd: run(testCheck), argv: runArgv(testCheck), source: `package.json scripts.${testCheck}`, requires, tool: runner ?? "generic", env: { CI: "true" }, scope: scopeOf(body) });
   } else if (runner === "vitest") {
     const r = bin("vitest", ["run"]);
-    b.check({ id: "node:test", tier: "test", label: "test", cmd: r.cmd, argv: r.argv, source: "vitest", requires: r.requires, tool: "vitest", env: { CI: "true" } });
+    b.check({ id: "node:test", tier: "test", label: "test", cmd: r.cmd, argv: r.argv, source: "vitest", requires: r.requires, tool: "vitest", env: { CI: "true" }, scope: scopeOf("vitest run") });
   } else if (runner === "jest") {
     const r = bin("jest", []);
-    b.check({ id: "node:test", tier: "test", label: "test", cmd: r.cmd, argv: r.argv, source: "jest", requires: r.requires, tool: "jest", env: { CI: "true" } });
+    b.check({ id: "node:test", tier: "test", label: "test", cmd: r.cmd, argv: r.argv, source: "jest", requires: r.requires, tool: "jest", env: { CI: "true" }, scope: scopeOf("jest") });
   }
   if (testScript && !testCheck) b.note(`scripts.${testScript} runs in watch mode; not used as a check`);
 

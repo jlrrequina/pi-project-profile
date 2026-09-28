@@ -68,5 +68,5 @@ export function detectGo(b: Builder): void {
   } else if (b.which("staticcheck")) {
     b.check({ id: "go:staticcheck", tier: "lint", label: "lint", cmd: "staticcheck ./...", argv: ["staticcheck", "./..."], source: "staticcheck on PATH", exts: [".go"], requires: { bin: "staticcheck" }, tool: "go" });
   }
-  b.check({ id: "go:test", tier: "test", label: "test", cmd: "go test ./...", argv: ["go", "test", "./..."], source: "go.mod", exts: [".go", ".mod", ".sum"], requires, tool: "go", env: { GOFLAGS: "-mod=readonly" } });
+  b.check({ id: "go:test", tier: "test", label: "test", cmd: "go test ./...", argv: ["go", "test", "./..."], source: "go.mod", exts: [".go", ".mod", ".sum"], requires, tool: "go", env: { GOFLAGS: "-mod=readonly" }, scope: { kind: "go" } });
 }

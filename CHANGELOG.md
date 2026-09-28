@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+- Scoped test runs: when the changed files allow it, the test tier runs `vitest related --run`, `jest --findRelatedTests`, `go test ./<pkg>/...`, `cargo test -p <package>` (workspace root package; members already run in their own directory) or `pytest <changed test files>` instead of the whole suite. Config/manifest changes, unknown file kinds and ambiguous mappings fall back to the full run; previously failing checks keep their file list across repair rounds. The binary is still resolved at run time.
+- Detector version 9 (new `scope` field on checks).
+
 ## 0.1.0 — 2026-09-29
 
 Initial release.

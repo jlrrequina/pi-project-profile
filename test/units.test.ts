@@ -15,6 +15,8 @@ import { buildPlan, isDocOnly } from "../verify/plan.ts";
 import { pruneOutput } from "../verify/prune.ts";
 import { resolveArgv } from "../verify/resolve.ts";
 import { runCommand } from "../verify/run.ts";
+import { scopeCheck, scopeFromScript } from "../verify/scope.ts";
+import { runCheck } from "../verify/gate.ts";
 import { looksLikeDirective } from "../detect/repo.ts";
 import { NODE_BIN_PREFIX, PY_PREFIX } from "../types.ts";
 
@@ -363,6 +365,94 @@ test("resolveArgv binds node_modules/.bin and python tools at run time", () => {
   assert.ok(nope.missing);
   const plain = resolveArgv({ ...base, argv: ["/no/such/binary", "a"] });
   assert.ok(plain.missing);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------- scoped tests
+const binHead = (t: string) => `${NODE_BIN_PREFIX}${t}`;
+const display = (t: string) => `pnpm exec ${t}`;
+
+test("scopeFromScript: plain vitest/jest scripts become related-test runs; anything else stays a full run", () => {
+  const v = scopeFromScript("vitest run", binHead, display)!;
+  assert.equal(v.kind, "vitest");
+  assert.deepEqual(v.argv, [`${NODE_BIN_PREFIX}vitest`, "related", "--run", "--passWithNoTests"]);
+  assert.equal(v.cmd, "pnpm exec vitest related --run --passWithNoTests");
+  // coverage/watch flags are dropped (thresholds would fail a partial run), other flags are kept
+  assert.deepEqual(scopeFromScript("vitest run --coverage --reporter=dot", binHead, display)!.argv!.slice(1), ["related", "--run", "--passWithNoTests", "--reporter=dot"]);
+  assert.deepEqual(scopeFromScript("CI=true cross-env NODE_ENV=test jest --ci", binHead, display)!.argv, [`${NODE_BIN_PREFIX}jest`, "--findRelatedTests", "--passWithNoTests", "--ci"]);
+  // flags with separate values cannot be carried over safely
+  assert.equal(scopeFromScript("vitest run --config vitest.unit.ts", binHead, display), undefined);
+  for (const body of ["pnpm -r test", "node --test", "vitest run tests/unit", "mocha", "jest && eslint ."]) assert.equal(scopeFromScript(body, binHead, display), undefined, body);
+});
+
+test("scopeCheck: vitest/jest, go packages, cargo members, pytest test files — full run whenever narrowing is unsafe", () => {
+  const base = { id: "t", tier: "test" as const, label: "test", cwd: "/x", source: "t", requires: {} };
+  const vitest = { ...base, cmd: "pnpm run test", argv: ["pnpm", "run", "test"], scope: scopeFromScript("vitest run", binHead, display) };
+  assert.deepEqual(scopeCheck(vitest, ["src/a.ts", "src/b.tsx", "src/a.ts"])!.argv, [`${NODE_BIN_PREFIX}vitest`, "related", "--run", "--passWithNoTests", "src/a.ts", "src/b.tsx"]);
+  assert.equal(scopeCheck(vitest, ["src/a.ts", "vite.config.ts"]), undefined);
+  assert.equal(scopeCheck(vitest, ["src/a.ts", "src/theme.css"]), undefined);
+  assert.equal(scopeCheck(vitest, ["package.json"]), undefined);
+  assert.equal(scopeCheck(vitest, []), undefined);
+  assert.ok(scopeCheck(vitest, Array.from({ length: 6 }, (_, i) => `src/f${i}.ts`))!.cmd.endsWith("src/f3.ts (+2)"));
+
+  const go = { ...base, cmd: "go test ./...", argv: ["go", "test", "./..."], scope: { kind: "go" as const } };
+  assert.deepEqual(scopeCheck(go, ["pkg/a/x.go", "pkg/a/y_test.go", "cmd/z/main.go"])!.argv, ["go", "test", "./cmd/z/...", "./pkg/a/..."]);
+  assert.equal(scopeCheck(go, ["main.go"]), undefined);
+  assert.equal(scopeCheck(go, ["pkg/a/x.go", "go.mod"]), undefined);
+
+  const root = tmp();
+  write(root, "Cargo.toml", `[workspace]\nmembers = ["crates/*"]\n`);
+  write(root, "crates/a/Cargo.toml", `[package]\nname = "alpha"\n`);
+  write(root, "crates/b/Cargo.toml", `[package]\nname = "beta"\n`);
+  const cargo = { ...base, cwd: root, cmd: "cargo test", argv: ["cargo", "test", "--quiet"], scope: { kind: "cargo" as const } };
+  assert.deepEqual(scopeCheck(cargo, ["crates/b/src/lib.rs", "crates/a/src/x.rs", "crates/a/Cargo.toml"])!.argv, ["cargo", "test", "--quiet", "-p", "alpha", "-p", "beta"]);
+  assert.equal(scopeCheck(cargo, ["crates/a/src/x.rs", "Cargo.toml"]), undefined);
+  assert.equal(scopeCheck(cargo, ["Cargo.lock"]), undefined);
+  // virtual workspace root: a root-level source file cannot be attributed to a package
+  assert.equal(scopeCheck(cargo, ["src/lib.rs"]), undefined);
+  // workspace root that is a package itself: root sources narrow to that package instead of the whole workspace
+  write(root, "Cargo.toml", `[package]\nname = "rootpkg"\n[workspace]\nmembers = ["crates/*"]\n`);
+  assert.deepEqual(scopeCheck(cargo, ["src/main.rs"])!.argv, ["cargo", "test", "--quiet", "-p", "rootpkg"]);
+  assert.equal(scopeCheck(cargo, ["src/main.rs", "Cargo.toml"]), undefined);
+  write(root, "Cargo.toml", `[package]\nname = "single"\n`);
+  assert.equal(scopeCheck(cargo, ["src/lib.rs"]), undefined);
+  rmSync(root, { recursive: true, force: true });
+
+  const pytest = { ...base, cmd: "uv run pytest -q", argv: [`${PY_PREFIX}uv:pytest`, "-q"], scope: { kind: "pytest" as const } };
+  assert.deepEqual(scopeCheck(pytest, ["tests/test_a.py", "tests/b_test.py"])!.argv, [`${PY_PREFIX}uv:pytest`, "-q", "tests/test_a.py", "tests/b_test.py"]);
+  assert.equal(scopeCheck(pytest, ["pkg/mod.py", "tests/test_a.py"]), undefined);
+  assert.equal(scopeCheck(pytest, ["tests/conftest.py"]), undefined);
+  assert.equal(scopeCheck(pytest, ["tests/test_a.py", "pyproject.toml"]), undefined);
+});
+
+test("scoped test runs end to end: detector → plan (files kept, mustRun merged, unscoped = full) → runCheck late-binds the scoped binary", async () => {
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "x", scripts: { test: "vitest run" }, devDependencies: { vitest: "2" } }));
+  write(root, "pnpm-lock.yaml", "");
+  write(root, "src/a.ts", "");
+  write(root, "src/b.ts", "");
+  mkdirSync(join(root, "node_modules", ".bin"), { recursive: true });
+  // fake vitest: print its argv and fail, so the args land in the pruned summary
+  writeFileSync(join(root, "node_modules", ".bin", "vitest"), '#!/bin/sh\necho "FAIL argv: $*"\nexit 1\n', { mode: 0o755 });
+  const stored: StoredProfile = { detected: detectProject(root, config), user: emptyUserData(), updatedAt: "" };
+  const test = effectiveChecks(stored).find((c) => c.id === "node:test")!;
+  assert.equal(test.scope?.kind, "vitest");
+  const opts = { projectRoot: root, ignoreDirs: DEFAULT_CONFIG.ignoreDirs, profileFor: () => stored, checksFor: (s: StoredProfile) => effectiveChecks(s) };
+  const plan = buildPlan([join(root, "src/b.ts")], { ...opts, mustRun: [{ check: test, files: ["src/a.ts"] }] });
+  const planned = plan.byTier.get("test")!.find((p) => p.check.id === "node:test")!;
+  assert.deepEqual(planned.files, ["src/b.ts", "src/a.ts"]);
+  const hooks = { permission: async () => "allow" as const, broken: new Map<string, string>() };
+  const run = await runCheck(planned, config, hooks);
+  assert.equal(run.status, "fail");
+  assert.ok(run.summary.some((l) => l.includes("argv: related --run --passWithNoTests src/b.ts src/a.ts")), run.summary.join("\n"));
+  assert.equal(run.check.cmd, "pnpm exec vitest related --run --passWithNoTests src/b.ts src/a.ts");
+  // unscoped (manual /verify, run_checks without files): the detected command runs as-is
+  const full = buildPlan([], { ...opts, unscoped: true }).byTier.get("test")!.find((p) => p.check.id === "node:test")!;
+  assert.deepEqual(full.files, []);
+  // a config change disables narrowing for that round
+  const cfg = buildPlan([join(root, "src/b.ts"), join(root, "vite.config.ts")], opts).byTier.get("test")!.find((p) => p.check.id === "node:test")!;
+  assert.deepEqual(cfg.files, ["src/b.ts", "vite.config.ts"]);
+  assert.equal(scopeCheck(cfg.check, cfg.files), undefined);
   rmSync(root, { recursive: true, force: true });
 });
 

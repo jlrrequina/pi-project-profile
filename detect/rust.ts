@@ -90,5 +90,5 @@ export function detectRust(b: Builder): void {
   if (b.hasFile("clippy.toml") || b.hasFile(".clippy.toml") || tomlHasTable(cargo, "lints")) {
     b.check({ id: "cargo:clippy", tier: "lint", label: "lint", cmd: "cargo clippy --all-targets", argv: ["cargo", "clippy", "--all-targets", "--quiet", "--color", "never"], source: "clippy config present", exts, requires: { bin: "cargo", hint: "clippy component missing (rustup component add clippy)" }, tool: "cargo" });
   }
-  b.check({ id: "cargo:test", tier: "test", label: "test", cmd: "cargo test", argv: ["cargo", "test", "--quiet", "--color", "never"], source: "Cargo.toml", exts, requires, tool: "cargo" });
+  b.check({ id: "cargo:test", tier: "test", label: "test", cmd: "cargo test", argv: ["cargo", "test", "--quiet", "--color", "never"], source: "Cargo.toml", exts, requires, tool: "cargo", scope: isWorkspace ? { kind: "cargo" } : undefined });
 }

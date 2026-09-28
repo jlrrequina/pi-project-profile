@@ -110,7 +110,8 @@ export function renderPromptSection(stored: StoredProfile, config: ProfileConfig
     const bits: string[] = [];
     if (auto.length) bits.push(`runs ${uniqCmds(auto).map((c) => `\`${c}\``).join(", ")} automatically`);
     const t = tierAllowed("test", stored, config);
-    if (tests.length) bits.push(`${t === "allow" ? "runs" : t === "deny" ? "does not run" : "asks once before running"} tests (${uniqCmds(tests).map((c) => `\`${c}\``).join(", ")})`);
+    const scoped = tests.some((c) => c.scope) ? ", narrowed to the tests related to the changed files when possible" : "";
+    if (tests.length) bits.push(`${t === "allow" ? "runs" : t === "deny" ? "does not run" : "asks once before running"} tests (${uniqCmds(tests).map((c) => `\`${c}\``).join(", ")}${scoped})`);
     const bl = tierAllowed("build", stored, config);
     if (builds.length && bl !== "deny") bits.push(`${bl === "allow" ? "runs" : "asks once before running"} builds (${uniqCmds(builds).map((c) => `\`${c}\``).join(", ")})`);
     lines.push(`- Verification: after each turn that changed files, the harness ${bits.join("; ")}. Failures come back as a message: fix the cause, never disable/skip/weaken a check, and do not report success while a check fails. \`run_checks\` runs them on demand.`);

@@ -32,6 +32,19 @@ export interface CheckRequirement {
   hint?: string;
 }
 
+/**
+ * How to narrow a check to the changed files (test tier). The full command
+ * stays the fallback whenever narrowing is not safe (config/manifest changed,
+ * unknown file kinds, virtual workspace root, …).
+ */
+export interface ScopeSpec {
+  kind: "vitest" | "jest" | "go" | "cargo" | "pytest";
+  /** argv prefix of the scoped form (late-bound head allowed); changed files are appended. Defaults derive from the check's own argv. */
+  argv?: string[];
+  /** Display prefix of the scoped form. */
+  cmd?: string;
+}
+
 export interface Check {
   /** Stable id, e.g. "node:typecheck", "cargo:check". Unique per project dir. */
   id: string;
@@ -56,6 +69,8 @@ export interface Check {
   unscopedArgs?: string[];
   /** Treat non-empty stdout as failure even with exit 0 (gofmt -l, cargo fmt --check style tools). */
   failOnOutput?: boolean;
+  /** Narrow the run to the changed files when possible (see verify/scope.ts). */
+  scope?: ScopeSpec;
   timeoutMs?: number;
   env?: Record<string, string>;
   requires?: CheckRequirement;

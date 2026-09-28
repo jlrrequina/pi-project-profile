@@ -11,7 +11,7 @@ const LOCKFILES = new Set(["package-lock.json", "pnpm-lock.yaml", "yarn.lock", "
 
 export interface PlannedCheck {
   check: Check;
-  /** Files relevant to this check, relative to check.cwd (empty when the check is not per-file). */
+  /** Files relevant to this check, relative to check.cwd (empty unless the check appends files or can be scoped to them). */
   files: string[];
 }
 
@@ -102,7 +102,8 @@ export function buildPlan(
         addPlanned(check, [...check.unscopedArgs]);
         continue;
       }
-      addPlanned(check, check.appendFiles ? rel : []);
+      // Scoped checks (test tier) remember their files too; an unscoped run passes none so the full command runs.
+      addPlanned(check, check.appendFiles || (check.scope && !opts.unscoped) ? rel : []);
     }
   }
   for (const c of opts.mustRun ?? []) addPlanned(c.check, c.files);
