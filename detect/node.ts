@@ -1,5 +1,5 @@
-import { join } from "node:path";
-import { expandDirGlob, hasNodeModules, relTo, uniq } from "../fs-utils.ts";
+import { dirname, join } from "node:path";
+import { expandDirGlob, hasNodeModules, isFile, readJson, relTo, uniq } from "../fs-utils.ts";
 import { NODE_BIN_PREFIX } from "../types.ts";
 import { scopeFromScript } from "../verify/scope.ts";
 import type { Builder } from "./context.ts";
@@ -95,6 +95,40 @@ const FRAMEWORKS: Array<[dep: string, label: string]> = [
 
 const WATCH_RE = /(^|\s)(-w|--watch|--watchAll|watch)(\s|$)/;
 const MUTATING_RE = /(^|\s)(--fix|--write|-w\b|--apply|--apply-unsafe)(\s|$)/;
+/** Script bodies that fan out over every workspace package. */
+const WORKSPACE_WIDE_RE = /(^|\s)(turbo|nx|lerna|rush|moon|wsrun|ultra)(\s|$)|(^|\s)pnpm\s+(-r|--recursive|-w|--filter|-F)\b|(^|\s)(npm|yarn)\s+.*(--workspaces|-ws\b|workspaces foreach)|(^|\s)bun\s+run\s+--filter|(^|\s)tsc\s+(-b|--build)\b/;
+
+interface WorkspaceContext {
+  root: string;
+  pm: "npm" | "pnpm" | "yarn" | "bun";
+  pmVersion?: string;
+  name?: string;
+}
+
+/**
+ * A package inside a workspace has no lockfile of its own: walk up (bounded)
+ * to the nearest ancestor that declares workspaces, a packageManager, or a
+ * lockfile, so commands render with the right package manager.
+ */
+function findWorkspaceContext(start: string): WorkspaceContext | undefined {
+  let dir = dirname(start);
+  for (let i = 0; i < 6; i++) {
+    const pkgPath = join(dir, "package.json");
+    const pkg = isFile(pkgPath) ? readJson<PackageJson>(pkgPath) : undefined;
+    const pmField = pkg?.packageManager?.match(/^(npm|pnpm|yarn|bun)@(\S+)/);
+    let pm: WorkspaceContext["pm"] | undefined;
+    if (pmField) pm = pmField[1] as WorkspaceContext["pm"];
+    else if (isFile(join(dir, "pnpm-workspace.yaml")) || isFile(join(dir, "pnpm-lock.yaml"))) pm = "pnpm";
+    else if (isFile(join(dir, "yarn.lock"))) pm = "yarn";
+    else if (isFile(join(dir, "bun.lock")) || isFile(join(dir, "bun.lockb"))) pm = "bun";
+    else if (isFile(join(dir, "package-lock.json")) || pkg?.workspaces) pm = "npm";
+    if (pm) return { root: dir, pm, pmVersion: pmField?.[2]?.split("+")[0], name: pkg?.name };
+    const parent = dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return undefined;
+}
 
 export function detectNode(b: Builder): void {
   if (!b.hasFile("package.json")) return;
@@ -112,6 +146,7 @@ export function detectNode(b: Builder): void {
   let pm = "npm";
   let pmVersion: string | undefined;
   const pmField = pkg.packageManager?.match(/^(npm|pnpm|yarn|bun)@(\S+)/);
+  const workspace = pmField || b.hasFile("pnpm-lock.yaml") || b.hasFile("yarn.lock") || b.hasFile("bun.lock") || b.hasFile("bun.lockb") || b.hasFile("package-lock.json") ? undefined : findWorkspaceContext(b.root);
   if (pmField) {
     pm = pmField[1]!;
     pmVersion = pmField[2]!.split("+")[0];
@@ -119,7 +154,12 @@ export function detectNode(b: Builder): void {
   else if (b.hasFile("yarn.lock")) pm = "yarn";
   else if (b.hasFile("bun.lock") || b.hasFile("bun.lockb")) pm = "bun";
   else if (b.hasFile("package-lock.json") || b.hasFile("npm-shrinkwrap.json")) pm = "npm";
-  else if (isDeno) pm = "deno";
+  else if (workspace) {
+    // A workspace member: inherit the workspace's package manager (its lockfile lives at the workspace root).
+    pm = workspace.pm;
+    pmVersion = workspace.pmVersion;
+    b.add(`workspace member of ${workspace.name ?? relTo(b.root, workspace.root)}`);
+  } else if (isDeno) pm = "deno";
   else if (b.hasFile("bunfig.toml")) pm = "bun";
   else b.note("no lockfile found; assuming npm");
   if (pm === "yarn" && !pmVersion) {
@@ -262,9 +302,11 @@ export function detectNode(b: Builder): void {
   const tsExts = [".ts", ".tsx", ".mts", ".cts", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte", ".astro", ".json"];
 
   // typecheck: prefer a usable script; else the raw tool
+  // Scripts that fan out over the workspace make package-level runs of the same label redundant.
+  const wide = (body: string | undefined) => (body !== undefined && !!workspaceGlobs && WORKSPACE_WIDE_RE.test(body)) || undefined;
   const tcCheck = find(TYPECHECK_NAMES, undefined, notWatch) ?? find(["check"], /\b(tsc|svelte-check|vue-tsc|astro check|tsgo)\b/, notWatch);
   if (tcCheck) {
-    b.check({ id: "node:typecheck", tier: "fast", label: "typecheck", cmd: run(tcCheck), argv: runArgv(tcCheck), source: `package.json scripts.${tcCheck}`, exts: tsExts, requires, tool: "tsc" });
+    b.check({ id: "node:typecheck", tier: "fast", label: "typecheck", cmd: run(tcCheck), argv: runArgv(tcCheck), source: `package.json scripts.${tcCheck}`, exts: tsExts, requires, tool: "tsc", coversWorkspace: wide(scripts[tcCheck]) });
   } else if (ts && (b.hasFile("tsconfig.json") || b.hasFile("tsconfig.base.json"))) {
     const tsconfig = b.hasFile("tsconfig.json") ? b.json<any>("tsconfig.json") : undefined;
     const hasRefs = Array.isArray(tsconfig?.references) && tsconfig.references.length > 0;
@@ -278,7 +320,7 @@ export function detectNode(b: Builder): void {
     else if (hasRefs && !hasOwnFiles) [r, source] = [bin("tsc", ["-b", "--noEmit"]), "tsconfig.json project references"];
     else if (b.hasFile("tsconfig.json")) r = bin("tsc", noEmitOk ? ["--noEmit", "-p", "tsconfig.json"] : ["-b"]);
     if (r) {
-      b.check({ id: "node:typecheck", tier: "fast", label: "typecheck", cmd: r.cmd, argv: r.argv, source, exts: tsExts, requires: r.requires, tool: "tsc" });
+      b.check({ id: "node:typecheck", tier: "fast", label: "typecheck", cmd: r.cmd, argv: r.argv, source, exts: tsExts, requires: r.requires, tool: "tsc", coversWorkspace: (!!workspaceGlobs && hasRefs && !hasOwnFiles) || undefined });
       if (!b.commands["typecheck"]) b.command("typecheck", r.cmd, source);
     }
   }
@@ -287,7 +329,7 @@ export function detectNode(b: Builder): void {
   // lint: usable script, else biome/eslint on changed files
   const lintCheck = find(LINT_NAMES, undefined, readOnly) ?? (tcCheck !== "check" ? find(["check"], /\b(eslint|biome|oxlint|xo|standard)\b/, readOnly) : undefined);
   if (lintCheck) {
-    b.check({ id: "node:lint", tier: "lint", label: "lint", cmd: run(lintCheck), argv: runArgv(lintCheck), source: `package.json scripts.${lintCheck}`, exts: tsExts.concat([".css", ".scss", ".md", ".yml", ".yaml"]), requires, tool: /biome/.test(scripts[lintCheck]!) ? "biome" : "eslint" });
+    b.check({ id: "node:lint", tier: "lint", label: "lint", cmd: run(lintCheck), argv: runArgv(lintCheck), source: `package.json scripts.${lintCheck}`, exts: tsExts.concat([".css", ".scss", ".md", ".yml", ".yaml"]), requires, tool: /biome/.test(scripts[lintCheck]!) ? "biome" : "eslint", coversWorkspace: wide(scripts[lintCheck]) });
   } else if (biomeConfig || has("@biomejs/biome")) {
     const r = bin("biome", ["check", "--no-errors-on-unmatched", "--reporter=summary"]);
     b.check({ id: "node:lint", tier: "lint", label: "lint", cmd: `${r.cmd} <files>`, argv: r.argv, appendFiles: true, unscopedArgs: ["."], source: biomeConfig ?? "@biomejs/biome", exts: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".json", ".jsonc", ".css"], requires: r.requires, tool: "biome" });
@@ -300,7 +342,7 @@ export function detectNode(b: Builder): void {
   // format --check as a lint-tier check
   const fmtCheck = find(FORMAT_CHECK_NAMES, /--check|--list-different|-l\b|--test|--dry-run|check/, readOnly) ?? find(["format", "fmt"], /--check|--list-different/, readOnly);
   if (fmtCheck) {
-    b.check({ id: "node:format-check", tier: "lint", label: "format", cmd: run(fmtCheck), argv: runArgv(fmtCheck), source: `package.json scripts.${fmtCheck}`, exts: tsExts.concat([".css", ".scss", ".md", ".yml", ".yaml", ".html"]), requires, tool: /biome/.test(scripts[fmtCheck]!) ? "biome" : "prettier" });
+    b.check({ id: "node:format-check", tier: "lint", label: "format", cmd: run(fmtCheck), argv: runArgv(fmtCheck), source: `package.json scripts.${fmtCheck}`, exts: tsExts.concat([".css", ".scss", ".md", ".yml", ".yaml", ".html"]), requires, tool: /biome/.test(scripts[fmtCheck]!) ? "biome" : "prettier", coversWorkspace: wide(scripts[fmtCheck]) });
   } else if (b.conventions.includes("Prettier") && !lintCheck?.includes("prettier")) {
     const r = bin("prettier", ["--check", "--ignore-unknown"]);
     b.check({ id: "node:format-check", tier: "lint", label: "format", cmd: `${r.cmd} <files>`, argv: r.argv, appendFiles: true, unscopedArgs: ["."], source: "prettier config", exts: tsExts.concat([".css", ".scss", ".md", ".yml", ".yaml", ".html"]), requires: r.requires, tool: "prettier" });
@@ -313,7 +355,7 @@ export function detectNode(b: Builder): void {
   const scopeOf = (body: string) => scopeFromScript(body, (t) => `${NODE_BIN_PREFIX}${t}`, (t) => bin(t, []).cmd);
   if (testCheck) {
     const body = scripts[testCheck]!;
-    b.check({ id: "node:test", tier: "test", label: "test", cmd: run(testCheck), argv: runArgv(testCheck), source: `package.json scripts.${testCheck}`, requires, tool: runner ?? "generic", env: { CI: "true" }, scope: scopeOf(body) });
+    b.check({ id: "node:test", tier: "test", label: "test", cmd: run(testCheck), argv: runArgv(testCheck), source: `package.json scripts.${testCheck}`, requires, tool: runner ?? "generic", env: { CI: "true" }, scope: scopeOf(body), coversWorkspace: wide(body) });
   } else if (runner === "vitest") {
     const r = bin("vitest", ["run"]);
     b.check({ id: "node:test", tier: "test", label: "test", cmd: r.cmd, argv: r.argv, source: "vitest", requires: r.requires, tool: "vitest", env: { CI: "true" }, scope: scopeOf("vitest run") });
@@ -326,7 +368,7 @@ export function detectNode(b: Builder): void {
   // build tier (confirm-once)
   const buildCheck = find(["build"], undefined, notWatch);
   if (buildCheck) {
-    b.check({ id: "node:build", tier: "build", label: "build", cmd: run(buildCheck), argv: runArgv(buildCheck), source: `package.json scripts.${buildCheck}`, requires, tool: "generic" });
+    b.check({ id: "node:build", tier: "build", label: "build", cmd: run(buildCheck), argv: runArgv(buildCheck), source: `package.json scripts.${buildCheck}`, requires, tool: "generic", coversWorkspace: wide(scripts[buildCheck]) });
   }
 
   // syntax: node --check for plain JS

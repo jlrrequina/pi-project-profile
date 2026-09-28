@@ -71,6 +71,8 @@ export interface Check {
   failOnOutput?: boolean;
   /** Narrow the run to the changed files when possible (see verify/scope.ts). */
   scope?: ScopeSpec;
+  /** Runs across the whole workspace (turbo/nx/pnpm -r/tsc -b …): package-level checks with the same label are redundant when this runs. */
+  coversWorkspace?: boolean;
   timeoutMs?: number;
   env?: Record<string, string>;
   requires?: CheckRequirement;

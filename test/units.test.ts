@@ -331,6 +331,50 @@ test("buildPlan groups by project dir, filters by extension, handles doc-only ch
   rmSync(root, { recursive: true, force: true });
 });
 
+test("pnpm workspace: package files run the package's own typecheck with the workspace pm; a workspace-wide root run drops package duplicates", () => {
+  const root = tmp();
+  mkdirSync(join(root, ".git"));
+  write(root, "package.json", JSON.stringify({ name: "ws", private: true, packageManager: "pnpm@10.14.0", scripts: { typecheck: "pnpm -r typecheck", lint: "eslint ." }, devDependencies: { typescript: "5" } }));
+  write(root, "pnpm-workspace.yaml", "packages:\n  - 'packages/*'\n");
+  write(root, "pnpm-lock.yaml", "");
+  write(root, "eslint.config.js", "export default []");
+  for (const p of ["a", "b"]) {
+    write(root, `packages/${p}/package.json`, JSON.stringify({ name: `@ws/${p}`, scripts: { typecheck: "tsc --noEmit -p tsconfig.json" }, devDependencies: { typescript: "5" } }));
+    write(root, `packages/${p}/tsconfig.json`, JSON.stringify({ compilerOptions: { strict: true, noEmit: true }, include: ["src"] }));
+    write(root, `packages/${p}/src/index.ts`, "export const x = 1;\n");
+  }
+  write(root, "scripts/tool.ts", "export {};\n");
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const profiles = new Map<string, StoredProfile>();
+  const profileFor = (d: string) => {
+    if (!profiles.has(d)) profiles.set(d, { detected: detectProject(d, config, root), user: emptyUserData(), updatedAt: "" });
+    return profiles.get(d);
+  };
+  const opts = { projectRoot: root, gitRoot: root, ignoreDirs: DEFAULT_CONFIG.ignoreDirs, profileFor, checksFor: (s: StoredProfile) => effectiveChecks(s) };
+  // package member inherits the workspace package manager and uses its own script
+  const a = profileFor(join(root, "packages/a"))!.detected;
+  assert.ok(a.stack.includes("workspace member of ws") && a.stack.includes("pnpm 10.14.0"), a.stack.join(","));
+  assert.equal(a.commands["typecheck"]?.cmd, "pnpm run typecheck");
+  assert.equal(profileFor(root)!.detected.checks.find((c) => c.id === "node:typecheck")?.coversWorkspace, true);
+  assert.equal(a.checks.find((c) => c.id === "node:typecheck")?.coversWorkspace, undefined);
+  // only a package file changed → only that package's typecheck, in its directory
+  const p1 = buildPlan([join(root, "packages/a/src/index.ts")], opts).byTier.get("fast")!;
+  assert.deepEqual(p1.map((p) => [p.check.cwd.slice(root.length + 1), p.check.cmd]), [["packages/a", "pnpm run typecheck"]]);
+  // root file + package file → the workspace-wide root run covers the package; no duplicate
+  const p2 = buildPlan([join(root, "packages/a/src/index.ts"), join(root, "scripts/tool.ts")], opts).byTier.get("fast")!;
+  assert.deepEqual(p2.map((p) => [p.check.cwd.slice(root.length + 1), p.check.cmd]), [["", "pnpm run typecheck"]]);
+  // lint at the root is not workspace-wide (plain eslint .) → a package lint of its own would not be deduped (packages have none here); the root lint runs for the root file
+  assert.ok(buildPlan([join(root, "scripts/tool.ts")], opts).byTier.get("lint")!.some((p) => p.check.id === "node:lint" && p.check.cwd === root));
+  // repair round: the failing workspace-wide root run is a must-run and still covers the package's fresh run
+  const rootTc = { check: profileFor(root)!.detected.checks.find((c) => c.id === "node:typecheck")!, files: [] };
+  const p4 = buildPlan([join(root, "packages/a/src/index.ts")], { ...opts, mustRun: [rootTc] }).byTier.get("fast")!;
+  assert.deepEqual(p4.map((p) => p.check.cwd.slice(root.length + 1)), [""]);
+  // two packages changed → two package-level runs, still no root run
+  const p3 = buildPlan([join(root, "packages/a/src/index.ts"), join(root, "packages/b/src/index.ts")], opts).byTier.get("fast")!;
+  assert.deepEqual(p3.map((p) => p.check.cwd.slice(root.length + 1)).sort(), ["packages/a", "packages/b"]);
+  rmSync(root, { recursive: true, force: true });
+});
+
 // ---------------------------------------------------------------- runner
 test("runCommand: exit codes, timeout kills process group, output capture", async () => {
   const ok = await runCommand(["sh", "-c", "echo out; echo err 1>&2; exit 3"], { cwd: tmpdir(), timeoutMs: 5000 });

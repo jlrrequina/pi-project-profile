@@ -4,8 +4,9 @@
 
 - Scoped test runs: when the changed files allow it, the test tier runs `vitest related --run`, `jest --findRelatedTests`, `go test ./<pkg>/...`, `cargo test -p <package>` (workspace root package; members already run in their own directory) or `pytest <changed test files>` instead of the whole suite. Config/manifest changes, unknown file kinds and ambiguous mappings fall back to the full run; previously failing checks keep their file list across repair rounds. The binary is still resolved at run time.
 - `verify.perTurn` (default off): run the syntax + fast tiers after every turn that changed files (tool writes, or a git peek when a shell tool ran) and append a non-continuing informational note when red. Earlier per-turn notes are superseded to keep context small.
+- Monorepos: a package's files are checked with the package's own scripts/binaries in its directory, rendered with the workspace's package manager (a member without its own lockfile inherits pnpm/yarn/bun/npm from the workspace root). When the root also runs a workspace-wide command for the same check (`turbo`, `nx`, `pnpm -r`, `--workspaces`, `tsc -b` over references, ...) the package-level duplicate is skipped.
 - Boundary handlers now carry entries queued by earlier extensions instead of replacing the draft chain.
-- Detector version 9 (new `scope` field on checks).
+- Detector version 10 (new `scope` and `coversWorkspace` fields on checks).
 
 ## 0.1.0 — 2026-09-29
 

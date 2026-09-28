@@ -106,6 +106,21 @@ export function buildPlan(
       addPlanned(check, check.appendFiles || (check.scope && !opts.unscoped) ? rel : []);
     }
   }
-  for (const c of opts.mustRun ?? []) addPlanned(c.check, c.files);
+  // Previously failing checks re-run regardless of which files changed (their file lists merge with fresh ones).
+  const must = new Set<string>();
+  for (const c of opts.mustRun ?? []) {
+    addPlanned(c.check, c.files);
+    must.add(`${c.check.cwd}::${c.check.id}`);
+  }
+  // A workspace-wide root run (turbo, pnpm -r, tsc -b, ...) already covers the packages below it:
+  // drop fresh package-level runs of the same tier+label. Must-run entries are never dropped.
+  for (const t of TIER_ORDER) {
+    const list = byTier.get(t)!;
+    const wide = list.filter((p) => p.check.coversWorkspace);
+    if (wide.length === 0) continue;
+    const covered = (p: PlannedCheck) => !p.check.coversWorkspace && !must.has(`${p.check.cwd}::${p.check.id}`) && wide.some((w) => w.check.label === p.check.label && p.check.cwd.startsWith(w.check.cwd + sep));
+    for (const p of list.filter(covered)) added.delete(`${p.check.cwd}::${p.check.id}`);
+    byTier.set(t, list.filter((p) => !covered(p)));
+  }
   return { byTier, relevantFiles: relevant, ignoredFiles: ignored };
 }
