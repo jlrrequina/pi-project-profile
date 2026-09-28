@@ -1,3 +1,4 @@
+import { homedir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { exists, findGitRoot, findUp, realpath } from "../fs-utils.ts";
 import type { DetectedProfile, ProfileConfig, Tier } from "../types.ts";
@@ -109,13 +110,22 @@ export function isProjectDir(dir: string): boolean {
 }
 
 /**
- * Find the project root for a cwd: the nearest ancestor (up to the git root, or
- * fs root) that has a manifest; falls back to the git root, then cwd.
+ * Find the project root for a cwd: the nearest ancestor (up to the git root)
+ * that has a manifest; falls back to the git root, then cwd.
+ *
+ * Without a git root the walk stops below the home directory: a stray
+ * `~/package.json` must never turn `~` (and its private layout) into the
+ * project for everything underneath it.
  */
 export function findProjectRoot(cwd: string): { root: string; gitRoot?: string } {
   const start = realpath(cwd);
-  const gitRoot = findGitRoot(start);
-  const nearest = findUp(start, (d) => isProjectDir(d), gitRoot);
+  const home = realpath(homedir());
+  // A dotfiles repo rooted at ~ is not a project either; ignore it entirely.
+  const foundGit = findGitRoot(start);
+  const gitRoot = foundGit === home ? undefined : foundGit;
+  const belowHome = start !== home && start.startsWith(home + "/");
+  const stop = gitRoot ?? (belowHome ? home : undefined);
+  const nearest = findUp(start, (d) => d !== home && isProjectDir(d), stop);
   const root = nearest ?? gitRoot ?? start;
   return { root, gitRoot };
 }

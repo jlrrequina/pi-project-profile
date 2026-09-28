@@ -175,6 +175,39 @@ test("findProjectRoot walks up to nearest manifest but not past git root; neares
   rmSync(root, { recursive: true, force: true });
 });
 
+test("findProjectRoot never resolves to the home directory (stray ~/package.json) nor to a dotfiles git root at ~", () => {
+  const fakeHome = tmp();
+  const prevHome = process.env.HOME;
+  process.env.HOME = fakeHome;
+  try {
+    write(fakeHome, "package.json", "{}");
+    mkdirSync(join(fakeHome, "Documents/Code/wrapper/app"), { recursive: true });
+    // no manifest, no git: stays at cwd instead of climbing to ~
+    const r1 = findProjectRoot(join(fakeHome, "Documents/Code/wrapper"));
+    assert.equal(r1.root, join(realpathOf(fakeHome), "Documents/Code/wrapper"));
+    assert.equal(r1.gitRoot, undefined);
+    // a manifest below home still wins
+    write(fakeHome, "Documents/Code/wrapper/app/package.json", "{}");
+    const r2 = findProjectRoot(join(fakeHome, "Documents/Code/wrapper/app/src".replace("/src", "")));
+    assert.equal(r2.root, join(realpathOf(fakeHome), "Documents/Code/wrapper/app"));
+    // dotfiles repo at ~ is ignored as a git root
+    mkdirSync(join(fakeHome, ".git"));
+    const r3 = findProjectRoot(join(fakeHome, "Documents/Code/wrapper"));
+    assert.equal(r3.gitRoot, undefined);
+    assert.equal(r3.root, join(realpathOf(fakeHome), "Documents/Code/wrapper"));
+    // cwd == home itself is left alone (user's explicit choice)
+    assert.equal(findProjectRoot(fakeHome).root, realpathOf(fakeHome));
+  } finally {
+    process.env.HOME = prevHome;
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
+});
+
+function realpathOf(p: string): string {
+  const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
+  return fs.realpathSync(p);
+}
+
 // ---------------------------------------------------------------- store
 test("cache round-trip, staleness, user data survives re-detect", () => {
   const agent = tmp();
