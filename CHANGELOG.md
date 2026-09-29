@@ -10,8 +10,10 @@
 - **Test conventions and single-test commands** in the profile (`*.test.ts` next to source, `test_*.py` in tests/, …; `vitest run <file> -t`, `pytest <file>::<test>`, `go test -run`, `cargo test -p`, rspec, phpunit, gradle, maven, dotnet, swift, mix, dart, deno).
 - **`/profile doctor`**: required vs installed runtimes (node, python, go, rust, bun), tool and dependency availability, and the commands that would fix them (never run).
 - **Parallel checks**: read-only tiers run concurrently (`verify.concurrency`, auto = half the cores, max 4); tools sharing a lock (cargo, gradle, go, …) stay serial; tests and builds run one at a time.
-- **Windows**: separator-safe home guard, `/verify` paths, context-file matching and cross-drive files; CI on Linux, macOS and Windows.
-- Detector version 11.
+- **Windows**: separator-safe home guard, `/verify` paths, context-file matching and cross-drive files; CI on Linux, macOS and Windows (Node 22.18 and 24).
+- Fixed: availability is judged on the command that actually runs, so a narrowed `vitest related` run no longer needs the package manager of the full command on PATH.
+- Fixed: shell linters found on PATH (shellcheck, hadolint) are added only when the repository has such files, and never hide the project's own CI or Makefile lint check — detection no longer depends on what happens to be installed.
+- Detector version 12.
 
 ## 0.2.0 — 2026-09-29
 
