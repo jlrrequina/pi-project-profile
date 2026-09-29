@@ -81,6 +81,7 @@
     "check": "tsc -p tsconfig.json",
     "test": "node --test test/*.test.ts",
     "scan": "node scripts/scan.ts",
-    "prepublishOnly": "npm run check && npm test"
+    "prepublishOnly": "npm run check && npm test",
+    "corpus": "node scripts/corpus.ts"
   }
 }

@@ -23,6 +23,8 @@ export interface DiagAnalysis {
 }
 
 const TAIL = "tail:";
+/** Package-manager wrapper lines report that a script failed; they are consequences, not diagnostics. */
+const WRAPPER = /^\s*(npm|pnpm|yarn|bun) (ERR!|error|warn)\b|ELIFECYCLE|ERR_PNPM_|^\s*error Command failed with exit code|^\s*info Visit https:\/\/yarnpkg/i;
 
 /** Normalise one diagnostic line into a location- and timing-independent key. */
 export function normalizeDiag(line: string, cwd?: string): string {
@@ -41,7 +43,7 @@ export function analyzeDiagnostics(text: string, cwd?: string): DiagAnalysis {
   const keys: DiagSet = new Map();
   const lines: DiagAnalysis["lines"] = [];
   for (let i = 0; i < all.length; i++) {
-    if (!isDiagnosticLine(all[i]!)) continue;
+    if (!isDiagnosticLine(all[i]!) || WRAPPER.test(all[i]!)) continue;
     const key = normalizeDiag(all[i]!, cwd);
     if (!key) continue;
     lines.push({ index: i, key });

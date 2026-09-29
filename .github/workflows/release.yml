@@ -1,0 +1,143 @@
+name: Release
+
+# npm authentication is trusted publishing (OIDC) in the "npm" environment: there is no npm token.
+#
+# One click: Actions → Release → Run workflow with patch | minor | major | X.Y.Z.
+#   "## Unreleased" in CHANGELOG.md becomes the release notes; the workflow bumps
+#   package.json, commits, tags, pushes, publishes with provenance and creates the
+#   GitHub release (tarball attached). "dry-run" does everything except push,
+#   publish and release.
+# By tag: push vX.Y.Z yourself (package.json and a "## X.Y.Z" section already there).
+# Re-running a failed release resumes it: an existing tag is published and released
+# only where that has not happened yet.
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: patch, minor, major, or an exact X.Y.Z
+        required: true
+        default: patch
+      dry-run:
+        description: Do everything except push, publish and release
+        type: boolean
+        default: false
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    if: github.repository == 'jlrrequina/pi-project-profile'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: npm
+    permissions:
+      contents: write # push the release commit and tag, create the GitHub release
+      id-token: write # npm trusted publishing and provenance
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+      - name: npm with trusted publishing support
+        run: npm install -g npm@11 && npm --version
+
+      - name: Resolve the version
+        id: v
+        env:
+          EVENT: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+          REF: ${{ github.ref }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          if [ "$EVENT" = "push" ]; then
+            version="${REF_NAME#v}"
+            if [ "$(node -p "require('./package.json').version")" != "$version" ]; then echo "::error::tag $REF_NAME does not match package.json"; exit 1; fi
+            git fetch --quiet origin main
+            if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then echo "::error::$REF_NAME is not on main"; exit 1; fi
+            mode=tag
+          else
+            if [ "$REF" != "refs/heads/main" ]; then echo "::error::run the release from main"; exit 1; fi
+            if ! [[ "$INPUT_VERSION" =~ ^(patch|minor|major|[0-9]+\.[0-9]+\.[0-9]+)$ ]]; then echo "::error::version must be patch, minor, major or X.Y.Z"; exit 1; fi
+            version="$(npm version "$INPUT_VERSION" --no-git-tag-version --ignore-scripts)"
+            version="${version#v}"
+            if git rev-parse -q --verify "refs/tags/v$version" > /dev/null; then
+              echo "v$version already exists: resuming it"
+              git checkout --quiet -- package.json package-lock.json
+              git checkout --quiet "v$version"
+              mode=resume
+            else
+              node scripts/changelog.ts release "$version" "$(date -u +%F)"
+              mode=new
+            fi
+          fi
+          node scripts/changelog.ts notes "$version" > "$RUNNER_TEMP/release-notes.md"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "mode=$mode" >> "$GITHUB_OUTPUT"
+          { echo "### Release $version ($mode)"; echo; cat "$RUNNER_TEMP/release-notes.md"; } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Commit and tag
+        if: steps.v.outputs.mode == 'new'
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          git add package.json package-lock.json CHANGELOG.md
+          git commit --quiet -m "release: $VERSION"
+          git tag -a "v$VERSION" -m "$VERSION"
+
+      - run: npm ci --ignore-scripts
+      - run: npm run check
+      - run: npm test
+
+      - name: Already on npm?
+        id: npm
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          name="$(node -p "require('./package.json').name")"
+          if npm view "$name@$VERSION" version > /dev/null 2>&1; then
+            echo "published=true" >> "$GITHUB_OUTPUT"
+            echo "$name@$VERSION is already on npm"
+          else
+            echo "published=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Push the release commit and tag
+        if: steps.v.outputs.mode == 'new' && !inputs.dry-run
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh auth setup-git
+          git push --atomic origin "HEAD:refs/heads/main" "refs/tags/v$VERSION"
+
+      - name: Publish to npm (trusted publishing, provenance)
+        if: steps.npm.outputs.published == 'false' && !inputs.dry-run
+        run: npm publish --provenance --access public
+
+      - name: Publish (dry run)
+        if: inputs.dry-run
+        run: npm publish --dry-run --access public
+
+      - name: GitHub release
+        if: ${{ !inputs.dry-run }}
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "v$VERSION" > /dev/null 2>&1; then echo "release v$VERSION already exists"; exit 0; fi
+          npm pack --silent
+          gh release create "v$VERSION" --title "v$VERSION" --notes-file "$RUNNER_TEMP/release-notes.md" --verify-tag ./*.tgz

@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Fixed: paths from tool calls are resolved through symlinks, so files in a symlinked checkout are grouped with their project, shown relative to it and attributed correctly by the review of changes.
+- Fixed: the "N known" count of pre-existing failures no longer includes package-manager wrapper lines (`npm error Lifecycle script … failed`).
+- Releases are published from GitHub Actions with npm provenance (trusted publishing).
+
 ## 1.0.0 — 2026-09-29
 
 - **Pre-existing failures.** Diagnostics recorded before a prompt form its baseline (normalised: no line numbers or timings, error codes kept, counted as a multiset). Only new diagnostics make the gate red, reach the agent and form the no-progress signature; a check that fails only with known diagnostics is reported once to the user, does not cost a repair round and no longer blocks the test tier. `/verify` still shows everything.

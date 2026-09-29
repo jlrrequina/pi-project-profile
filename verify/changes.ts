@@ -7,8 +7,8 @@
  *     tools, generated files)
  */
 import { spawn } from "node:child_process";
-import { statSync } from "node:fs";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { realpathSync, statSync } from "node:fs";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
 export type Snapshot = Map<string, string>; // repo-relative path → "status|mtime:size"
 
@@ -23,10 +23,23 @@ export function newTracker(gitRoot: string | undefined): ChangeTracker {
   return { gitRoot, tracked: new Set(), bashRan: false };
 }
 
-/** Absolute path for a tool's path argument, or undefined when it is not a usable string. */
+/** Physical path (symlinks resolved; a file that does not exist yet resolves through its directory), so it compares with the realpath'd project root. */
+export function physicalPath(p: string): string {
+  try {
+    return realpathSync(p);
+  } catch {
+    try {
+      return join(realpathSync(dirname(p)), basename(p));
+    } catch {
+      return p;
+    }
+  }
+}
+
+/** Absolute physical path for a tool's path argument, or undefined when it is not a usable string. */
 export function toolPath(cwd: string, path: unknown): string | undefined {
   if (typeof path !== "string" || !path) return undefined;
-  return isAbsolute(path) ? resolve(path) : resolve(cwd, path);
+  return physicalPath(isAbsolute(path) ? resolve(path) : resolve(cwd, path));
 }
 
 export function trackToolWrite(t: ChangeTracker, cwd: string, path: unknown): void {

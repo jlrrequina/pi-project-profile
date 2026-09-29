@@ -21,6 +21,8 @@ import { addedLines, collectFindings, formatFinding, isWeakening, mustFix, SKIP 
 import { fixHint } from "../verify/hints.ts";
 import { testConventions } from "../detect/tests.ts";
 import { doctorReport, satisfies } from "../profile/doctor.ts";
+import { releaseChangelog, sectionBody } from "../scripts/changelog.ts";
+import { expectations, invariants } from "../scripts/corpus.ts";
 import { discoverRules, generatedPatterns, generatedReason, globToRegExp, matchingRules, nestedInstructionFiles, parseFrontmatter, readInstruction, renderInjection } from "../profile/scoped.ts";
 import { defaultConcurrency, runCheck, runGate, runPool } from "../verify/gate.ts";
 import { analyzeDiagnostics, normalizeDiag, splitByBaseline } from "../verify/baseline.ts";
@@ -818,6 +820,35 @@ test("availability is judged on what actually runs: a scoped run does not need t
   assert.equal(scopedRun.status, "fail");
   const fullRun = await runCheck({ check, files: [] }, config, hooks);
   assert.equal(fullRun.status, "env");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------- release + corpus tooling
+test("changelog: release moves Unreleased to the version, keeps a fresh Unreleased, refuses empty/duplicate releases", () => {
+  const log = "# Changelog\n\n## Unreleased\n\n- Fixed a thing.\n\n## 1.0.0 — 2026-09-29\n\n- First.\n";
+  const out = releaseChangelog(log, "1.0.1", "2026-10-01");
+  assert.equal(out, "# Changelog\n\n## Unreleased\n\n## 1.0.1 — 2026-10-01\n\n- Fixed a thing.\n\n## 1.0.0 — 2026-09-29\n\n- First.\n");
+  assert.equal(sectionBody(out, "1.0.1"), "- Fixed a thing.");
+  assert.equal(sectionBody(out, "Unreleased"), "");
+  assert.equal(sectionBody(out, "1.0.0"), "- First.");
+  assert.throws(() => releaseChangelog(out, "1.0.2", "2026-10-02"), /nothing to release/);
+  assert.throws(() => releaseChangelog(log, "1.0.0", "2026-10-02"), /already has/);
+  assert.throws(() => releaseChangelog(log, "v1", "2026-10-02"), /not a version/);
+  assert.throws(() => releaseChangelog("# Changelog\n", "1.0.1", "d"), /no "## Unreleased"/);
+});
+
+test("corpus invariants: automatic checks must be read-only; determinism and bounds are enforced", () => {
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "x", scripts: { typecheck: "tsc --noEmit" } }));
+  const p = detectProject(root, config);
+  const stored: StoredProfile = { detected: p, user: emptyUserData(), updatedAt: "" };
+  const section = renderPromptSection(stored, config, { verifyEnabled: true, piLoadedContextFiles: [] });
+  assert.deepEqual(invariants(p, section, detectProject(root, config), section), []);
+  const writing = (cmd: string) => invariants({ ...p, checks: [{ id: "x:fmt", tier: "lint", label: "format", cmd, argv: ["x"], cwd: root, source: "t" }] }, section, { ...p, checks: [{ id: "x:fmt", tier: "lint", label: "format", cmd, argv: ["x"], cwd: root, source: "t" }] }, section);
+  for (const bad of ["gofmt -w .", "pnpm exec prettier --write <files>", "uv run ruff check --fix <files>", "black .", "cargo clippy --fix"]) assert.ok(writing(bad).some((e) => e.includes("writes files")), bad);
+  for (const good of ["gofmt -l <files>", "npx prettier --check --ignore-unknown <files>", "uv run ruff check --no-fix --output-format concise <files>", "uv run ruff format --check --diff <files>", "cargo fmt --check", "mix format --check-formatted <files>", "dotnet format --verify-no-changes"]) assert.deepEqual(writing(good), [], good);
+  assert.ok(invariants(p, section, { ...p, languages: ["Other"] }, section).includes("detection is not deterministic"));
+  assert.ok(expectations(p, { repo: "x/y", languages: ["Rust"], checks: ["cargo:check"] }).length === 2);
   rmSync(root, { recursive: true, force: true });
 });
 

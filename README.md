@@ -3,6 +3,7 @@
 [![npm](https://img.shields.io/npm/v/@lenard9191/pi-project-profile)](https://www.npmjs.com/package/@lenard9191/pi-project-profile)
 [![CI](https://github.com/jlrrequina/pi-project-profile/actions/workflows/ci.yml/badge.svg)](https://github.com/jlrrequina/pi-project-profile/actions/workflows/ci.yml)
 [![license](https://img.shields.io/npm/l/@lenard9191/pi-project-profile)](LICENSE)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jlrrequina/pi-project-profile/badge)](https://scorecard.dev/viewer/?uri=github.com/jlrrequina/pi-project-profile)
 
 Makes the [π coding agent](https://pi.dev) project-aware in any repository, then checks its work.
 
@@ -118,4 +119,4 @@ npm test                            # node --test
 node scripts/scan.ts <dir> --checks # print the profile + checks for any directory
 ```
 
-See [AGENTS.md](AGENTS.md) for the constraints every change must keep. MIT © John Lenard Requina
+CI runs the tests on Linux, macOS and Windows, a smoke test of the packed tarball, and weekly detection on ~20 real repositories (`node scripts/corpus.ts`). Releases are published from GitHub Actions with npm provenance. See [AGENTS.md](AGENTS.md) for the constraints every change must keep and [CONTRIBUTING.md](CONTRIBUTING.md) for releasing. MIT © John Lenard Requina
