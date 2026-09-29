@@ -119,4 +119,4 @@ npm test                            # node --test
 node scripts/scan.ts <dir> --checks # print the profile + checks for any directory
 ```
 
-CI runs the tests on Linux, macOS and Windows, a smoke test of the packed tarball, and weekly detection on ~20 real repositories (`node scripts/corpus.ts`). Releases are published from GitHub Actions with npm provenance. See [AGENTS.md](AGENTS.md) for the constraints every change must keep and [CONTRIBUTING.md](CONTRIBUTING.md) for releasing. MIT © John Lenard Requina
+CI runs the tests on Linux, macOS and Windows (Node 22.18, 24, 26), smoke-tests the packed tarball, and runs detection weekly on ~20 real repositories (`npm run corpus`). Releases are published from GitHub Actions with npm provenance and a signed build attestation. See [AGENTS.md](AGENTS.md) for the constraints every change must keep and [CONTRIBUTING.md](CONTRIBUTING.md) for releasing. MIT © John Lenard Requina

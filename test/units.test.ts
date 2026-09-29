@@ -22,6 +22,7 @@ import { fixHint } from "../verify/hints.ts";
 import { testConventions } from "../detect/tests.ts";
 import { doctorReport, satisfies } from "../profile/doctor.ts";
 import { releaseChangelog, sectionBody } from "../scripts/changelog.ts";
+import { compareVersions, planRelease } from "../scripts/release.ts";
 import { expectations, invariants } from "../scripts/corpus.ts";
 import { discoverRules, generatedPatterns, generatedReason, globToRegExp, matchingRules, nestedInstructionFiles, parseFrontmatter, readInstruction, renderInjection } from "../profile/scoped.ts";
 import { defaultConcurrency, runCheck, runGate, runPool } from "../verify/gate.ts";
@@ -835,6 +836,23 @@ test("changelog: release moves Unreleased to the version, keeps a fresh Unreleas
   assert.throws(() => releaseChangelog(log, "1.0.0", "2026-10-02"), /already has/);
   assert.throws(() => releaseChangelog(log, "v1", "2026-10-02"), /not a version/);
   assert.throws(() => releaseChangelog("# Changelog\n", "1.0.1", "d"), /no "## Unreleased"/);
+});
+
+test("release plan: bumps, exact versions, resume of a pushed tag, refusal to go backwards", () => {
+  const none = () => false;
+  assert.deepEqual(planRelease("1.0.0", "patch", none), { version: "1.0.1", mode: "new" });
+  assert.deepEqual(planRelease("1.2.3", "minor", none), { version: "1.3.0", mode: "new" });
+  assert.deepEqual(planRelease("1.2.3", "major", none), { version: "2.0.0", mode: "new" });
+  assert.deepEqual(planRelease("1.2.3", "1.10.0", none), { version: "1.10.0", mode: "new" });
+  // a re-run from the pre-release commit finds the tag the first run pushed
+  assert.deepEqual(planRelease("1.0.0", "patch", (v) => v === "1.0.1"), { version: "1.0.1", mode: "resume" });
+  // after the release commit landed, the exact version resumes; a bump would be a new release
+  assert.deepEqual(planRelease("1.0.1", "1.0.1", (v) => v === "1.0.1"), { version: "1.0.1", mode: "resume" });
+  assert.throws(() => planRelease("1.0.1", "1.0.1", none), /not newer/);
+  assert.throws(() => planRelease("1.2.3", "1.2.0", none), /not newer/);
+  assert.throws(() => planRelease("1.2.3", "v1.3.0", none), /not an X.Y.Z/);
+  assert.throws(() => planRelease("1.2.3", "prerelease", none), /not an X.Y.Z/);
+  assert.ok(compareVersions("11.19.0", "11.5.1") > 0 && compareVersions("11.5.0", "11.5.1") < 0 && compareVersions("2.0.0", "10.0.0") < 0);
 });
 
 test("corpus invariants: automatic checks must be read-only; determinism and bounds are enforced", () => {

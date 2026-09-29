@@ -20,9 +20,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 20
     permissions:
-      contents: read
-      security-events: write
-      actions: read
+      contents: read # read the repository
+      security-events: write # upload the results to code scanning
+      actions: read # read the workflows for the "actions" analysis
     strategy:
       fail-fast: false
       matrix:

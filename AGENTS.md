@@ -17,7 +17,8 @@ A π (pi-coding-agent) extension package. `README.md` is the user-facing referen
 npm run check                          # tsc, must be clean
 npm test                               # node --test test/*.test.ts, all passing
 node scripts/scan.ts <repo> --checks   # detector output for any real repository
+npm run corpus                         # detection on ~20 real repositories (clones them; CI runs it too)
 PI_PROJECT_PROFILE_DEBUG=1 pi -p "…"   # live gate trace in $TMPDIR/pi-project-profile/debug.jsonl
 ```
 
-Add a unit test for every detector or planner change. Keep `CHANGELOG.md` current.
+Add a unit test for every detector or planner change. Add changelog entries under `## Unreleased` in `CHANGELOG.md`; releases are cut by the Release workflow (see `CONTRIBUTING.md`), never by hand. Workflows pin actions to commit SHAs and must pass actionlint and zizmor.

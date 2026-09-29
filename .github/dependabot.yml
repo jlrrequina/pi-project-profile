@@ -4,15 +4,21 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    # wait a week after a release: compromised versions are usually caught and pulled by then
+    cooldown:
+      default-days: 7
     groups:
       actions:
         patterns: ["*"]
     commit-message:
       prefix: ci
+
   - package-ecosystem: npm
     directory: /
     schedule:
       interval: weekly
+    cooldown:
+      default-days: 7
     groups:
       dev-dependencies:
         dependency-type: development

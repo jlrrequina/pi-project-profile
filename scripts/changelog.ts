@@ -34,18 +34,20 @@ export function releaseChangelog(text: string, version: string, date: string): s
 
 const [, , cmd, version, date] = process.argv;
 if (cmd && process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-  const text = readFileSync("CHANGELOG.md", "utf8");
-  if (cmd === "release" && version) {
-    writeFileSync("CHANGELOG.md", releaseChangelog(text, version, date ?? new Date().toISOString().slice(0, 10)));
-  } else if (cmd === "notes" && version) {
-    const body = sectionBody(text, version);
-    if (!body) {
-      console.error(`CHANGELOG.md has no "## ${version}" section`);
-      process.exit(1);
+  try {
+    const text = readFileSync("CHANGELOG.md", "utf8");
+    if (cmd === "release" && version) {
+      writeFileSync("CHANGELOG.md", releaseChangelog(text, version, date ?? new Date().toISOString().slice(0, 10)));
+    } else if (cmd === "notes" && version) {
+      const body = sectionBody(text, version);
+      if (!body) throw new Error(`CHANGELOG.md has no "## ${version}" section`);
+      process.stdout.write(body + "\n");
+    } else {
+      console.error("usage: changelog.ts release <X.Y.Z> [YYYY-MM-DD] | notes <X.Y.Z>");
+      process.exit(2);
     }
-    process.stdout.write(body + "\n");
-  } else {
-    console.error("usage: changelog.ts release <X.Y.Z> [YYYY-MM-DD] | notes <X.Y.Z>");
-    process.exit(2);
+  } catch (err) {
+    console.error((err as Error).message);
+    process.exit(1);
   }
 }
