@@ -74,6 +74,10 @@ export function renderPromptSection(stored: StoredProfile, config: ProfileConfig
   }
   if (d.layout.length) lines.push(`- Layout: ${d.layout.join(" ")}`);
   if (d.services.length) lines.push(`- Services: ${d.services.join(" · ")}`);
+  if (d.generated?.length) {
+    const gen = cmds["generate"]?.cmd;
+    lines.push(`- Generated (don't hand-edit): ${d.generated.slice(0, 6).map((p) => `\`${p}\``).join(", ")}${d.generated.length > 6 ? ", …" : ""}${gen ? ` — regenerate with \`${gen}\`` : ""}`);
+  }
   const instr = d.instructionFiles;
   if (instr.length) {
     // Group large rule directories (.cursor/rules, .github/instructions, …) into one entry.

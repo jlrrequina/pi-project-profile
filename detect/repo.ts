@@ -8,6 +8,7 @@ import { clampText, exists, isDir, listDirs, listFiles, readText } from "../fs-u
 import type { InstructionFile, Tier } from "../types.ts";
 import type { Builder } from "./context.ts";
 import { composeServices } from "./context.ts";
+import { generatedPatterns } from "../profile/scoped.ts";
 
 // ---------------------------------------------------------------- Task runners
 const TARGET_KEYS: Array<[RegExp, string]> = [
@@ -22,6 +23,7 @@ const TARGET_KEYS: Array<[RegExp, string]> = [
   [/^(migrate|migrations|db-migrate)$/, "migrate"],
   [/^(install|deps|setup|bootstrap)$/, "install"],
   [/^(clean)$/, "clean"],
+  [/^(generate|gen|codegen|generate-all)$/, "generate"],
 ];
 
 /** Read-only-ish targets we are willing to run as checks when nothing ecosystem-specific exists. */
@@ -185,6 +187,11 @@ export function detectCI(b: Builder): { provider: string; files: string[]; runs:
 
 // ---------------------------------------------------------------- Conventions
 export function detectConventions(b: Builder): void {
+  // Generated code: linguist-generated patterns, and the command that regenerates.
+  b.generated = generatedPatterns(b.text(".gitattributes"));
+  if (b.hasFile("buf.gen.yaml") || b.hasFile("buf.gen.yml")) b.command("generate", "buf generate", "buf.gen.yaml");
+  if (b.hasFile("sqlc.yaml") || b.hasFile("sqlc.yml") || b.hasFile("sqlc.json")) b.command("generate", "sqlc generate", "sqlc config");
+
   const ec = b.text(".editorconfig");
   if (ec) {
     const star = ec.match(/^\[\*\]\s*\n([\s\S]*?)(?=^\[|\Z)/m)?.[1] ?? "";

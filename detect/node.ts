@@ -288,7 +288,11 @@ export function detectNode(b: Builder): void {
   pick("fix", ["lint:fix", "fix", "lint-fix", "fix:lint", "lint:write", "check:fix", "fix:all"], /--fix|--write|--apply|\bfix\b/, writes);
   pick("docs", ["docs", "docs:dev", "storybook"]);
   pick("migrate", ["migrate", "db:migrate", "prisma:migrate"]);
-  if (b.hasFile("prisma/schema.prisma")) b.add("Prisma schema (prisma/schema.prisma)");
+  pick("generate", ["generate", "codegen", "gen", "generate:all", "prisma:generate", "db:generate", "gql:codegen", "graphql:codegen", "openapi", "openapi:generate", "api:generate"], undefined, notWatch);
+  if (b.hasFile("prisma/schema.prisma")) {
+    b.add("Prisma schema (prisma/schema.prisma)");
+    if (!b.commands["generate"]) b.command("generate", `${pm === "npm" ? "npx" : pm === "yarn" ? "yarn" : `${pm} exec`} prisma generate`, "prisma/schema.prisma");
+  }
 
   // ---- checks ----
   const nm = hasNodeModules(b.root);

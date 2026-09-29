@@ -116,6 +116,8 @@ export interface DetectedProfile {
   services: string[];
   notes: string[];
   monorepo?: { kind: string; packages?: number; tool?: string };
+  /** `.gitattributes` linguist-generated patterns (hand edits are overwritten). */
+  generated?: string[];
   /** file → "mtime:size" for cache invalidation. */
   fingerprint: Record<string, string>;
 }
@@ -168,6 +170,8 @@ export interface ProfileConfig {
     maxInstructionTotalChars: number;
     /** Include instruction-file contents inline (else list only). */
     inlineInstructionFiles: boolean;
+    /** Deliver nested AGENTS.md/CLAUDE.md and glob-scoped rules (.cursor/rules, .github/instructions, .windsurf/rules) when the agent first touches a file they apply to. */
+    scopedInstructions: boolean;
   };
   ignoreDirs: string[];
 }
@@ -193,6 +197,7 @@ export const DEFAULT_CONFIG: ProfileConfig = {
     maxInstructionFileChars: 3000,
     maxInstructionTotalChars: 6000,
     inlineInstructionFiles: true,
+    scopedInstructions: true,
   },
   ignoreDirs: [
     ".git",

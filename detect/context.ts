@@ -44,6 +44,7 @@ export class Builder {
   notes: string[] = [];
   services: string[] = [];
   monorepo?: { kind: string; packages?: number; tool?: string };
+  generated: string[] = [];
   fingerprintFiles = new Set<string>();
   private textCache = new Map<string, string | undefined>();
 
@@ -157,6 +158,7 @@ export class Builder {
       services: this.services,
       notes: this.notes,
       monorepo: this.monorepo,
+      generated: this.generated.length ? this.generated : undefined,
       fingerprint,
       ...partial,
     };

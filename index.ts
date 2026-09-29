@@ -30,6 +30,9 @@ import { buildPlan, TIER_ORDER, type PlannedCheck } from "./verify/plan.ts";
 import { logDir, pruneLogs } from "./verify/run.ts";
 import { collectFindings, formatFinding, headContent, isWeakening, mustFix, readForDiff, SKIP, type Before, type Finding } from "./verify/findings.ts";
 import { fixHint } from "./verify/hints.ts";
+import { discoverRules, generatedPatterns, generatedReason, matchingRules, nestedInstructionFiles, readInstruction, renderInjection, type InjectionPart, type ScopedRule } from "./profile/scoped.ts";
+import { readFileSync, statSync } from "node:fs";
+import { dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
@@ -96,8 +99,32 @@ interface SessionState {
   promptBaseline: Map<string, Map<string, number>>;
   /** Checks whose pre-existing failures were already reported to the user this session. */
   notifiedKnown: Set<string>;
+  /** Glob-scoped / always-on rule files (.cursor/rules, .github/instructions, .windsurf/rules). */
+  rules: ScopedRule[];
+  /** Instruction files (abs paths and "#"+content hashes) already delivered this session. */
+  injected: Set<string>;
+  /** linguist-generated patterns (relative to the git root, else the project root). */
+  genPatterns: string[];
+  /** Generated files already warned about this session. */
+  generatedWarned: Set<string>;
   mode: string;
   hasUI: boolean;
+}
+
+function readTextSafe(p: string): string | undefined {
+  try {
+    return readFileSync(p, "utf8");
+  } catch {
+    return undefined;
+  }
+}
+
+function readHead(p: string): string | undefined {
+  try {
+    return readFileSync(p, "utf8").slice(0, 2000);
+  } catch {
+    return undefined;
+  }
 }
 
 export default function projectProfile(pi: ExtensionAPI) {
@@ -437,6 +464,10 @@ export default function projectProfile(pi: ExtensionAPI) {
       lastDiag: new Map(),
       promptBaseline: new Map(),
       notifiedKnown: new Set(),
+      rules: discoverRules(uniq([root, gitRoot ?? root])),
+      injected: new Set(),
+      genPatterns: generatedPatterns(readTextSafe(join(gitRoot ?? root, ".gitattributes"))),
+      generatedWarned: new Set(),
       mode: ctx.mode,
       hasUI: ctx.hasUI,
     };
@@ -526,6 +557,78 @@ export default function projectProfile(pi: ExtensionAPI) {
       else if (typeof event.input.file === "string") track(event.input.file);
       else shell();
     }
+  });
+
+  // ------------------------------------------------------------------ notes on tool results: scoped instructions, generated files
+  pi.on("tool_result", async (event, ctx) => {
+    if (!s || event.isError || event.toolName === "bash" || event.toolName === "powershell") return;
+    const st = s;
+    const input = event.input as Record<string, unknown>;
+    const given = toolPath(ctx.cwd, input.path ?? input.file ?? input.filePath);
+    if (!given) return;
+    const abs = realpath(given);
+    const top = st.gitRoot ?? st.root;
+    if (!(abs === top || abs.startsWith(top + sep))) return;
+    const display = (p: string) => relative(top, p).split(sep).join("/") || ".";
+    const notes: string[] = [];
+    const mutation = isMutationTool(event.toolName);
+    // Generated files: hand edits are overwritten on regeneration.
+    if (mutation && st.config.verify.guard && !st.generatedWarned.has(abs)) {
+      const orig = st.prompt.orig.get(given) ?? st.prompt.orig.get(abs);
+      const head = typeof orig === "string" && orig !== SKIP ? orig.slice(0, 2000) : readHead(abs);
+      const reason = generatedReason(display(abs), head, st.genPatterns);
+      if (reason) {
+        st.generatedWarned.add(abs);
+        const prof = profileFor(dirname(abs)) ?? st.stored;
+        const gen = prof ? effectiveCommands(prof)["generate"]?.cmd : undefined;
+        notes.push(`[project-profile] ${display(abs)} is a generated file (${reason}): hand edits are overwritten the next time it is regenerated. Change the source it is generated from and regenerate${gen ? ` (\`${gen}\`)` : ""}, unless the user explicitly asked for a hand edit.`);
+        debug("generated", { file: display(abs), reason });
+      }
+    }
+    // Instructions that apply here but that π did not load (nested AGENTS.md, glob-scoped rules).
+    if (st.config.profile.scopedInstructions) {
+      let isDirectory = false;
+      try {
+        isDirectory = statSync(abs).isDirectory();
+      } catch {
+        /* new file */
+      }
+      const targetDir = isDirectory ? abs : dirname(abs);
+      const maxFile = st.config.profile.maxInstructionFileChars;
+      let budget = st.config.profile.maxInstructionTotalChars;
+      const parts: InjectionPart[] = [];
+      const deliver = (file: string, scope?: string) => {
+        if (st.injected.has(file)) return;
+        st.injected.add(file);
+        const part = readInstruction(file, display(file), maxFile, scope);
+        if (part.hash) {
+          if (st.injected.has("#" + part.hash)) return; // same content already delivered (CLAUDE.md → AGENTS.md symlinks)
+          st.injected.add("#" + part.hash);
+        }
+        if (part.content !== undefined) {
+          if (part.content.length > budget) {
+            part.note = `${Math.round(part.content.length / 1024) || 1} KB — read it before changing files here`;
+            delete part.content;
+          } else budget -= part.content.length;
+        }
+        parts.push(part);
+      };
+      for (const f of nestedInstructionFiles(targetDir, realpath(ctx.cwd), top)) deliver(f);
+      if (!isDirectory) for (const r of matchingRules(abs, st.rules)) deliver(r.abs, r.always ? "all files" : r.patterns.join(", "));
+      if (parts.length) {
+        notes.push(renderInjection(display(abs), parts));
+        debug("scoped", { target: display(abs), files: parts.map((p) => p.path) });
+      }
+    }
+    if (notes.length === 0) return;
+    return { content: [...event.content, { type: "text" as const, text: notes.join("\n\n") }] };
+  });
+
+  // Compaction may summarise delivered instructions away: deliver again on the next touch.
+  pi.on("session_compact", async () => {
+    if (!s) return;
+    s.injected.clear();
+    s.generatedWarned.clear();
   });
 
   // ------------------------------------------------------------------ the gate
