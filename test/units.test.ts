@@ -17,6 +17,8 @@ import { resolveArgv, resolvePython } from "../verify/resolve.ts";
 import { platformArgv, runCommand } from "../verify/run.ts";
 import { scopeCheck, scopeFromScript } from "../verify/scope.ts";
 import { collectChanges, newTracker, peekChanges, snapshotStart, toolPath } from "../verify/changes.ts";
+import { addedLines, collectFindings, formatFinding, isWeakening, mustFix, SKIP } from "../verify/findings.ts";
+import { fixHint } from "../verify/hints.ts";
 import { defaultConcurrency, runCheck, runGate, runPool } from "../verify/gate.ts";
 import { analyzeDiagnostics, normalizeDiag, splitByBaseline } from "../verify/baseline.ts";
 import { looksLikeDirective } from "../detect/repo.ts";
@@ -537,6 +539,91 @@ test("gate: read-only checks in one tier run in parallel; the verdict keeps plan
   assert.deepEqual(v.runs.map((r) => r.check.id), ["a", "b", "c"]);
   assert.ok(v.runs.every((r) => r.status === "pass"));
   assert.ok(v.durationMs < 1100, `took ${v.durationMs}ms`);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------- diff guard + fix hints
+test("addedLines is a multiset diff: moved lines are not added, repeated ones are", () => {
+  assert.deepEqual(addedLines("a\nb\nc\n", "c\na\nb\n"), []);
+  assert.deepEqual(addedLines("x\n", "x\nx\ny\n").map((l) => [l.line, l.text]), [[2, "x"], [3, "y"]]);
+});
+
+test("diff guard: suppressions, focus/skip, stubs, loosened configs, removed/deleted tests, secrets, .env, lockfile drift", () => {
+  const root = tmp();
+  const before = new Map<string, string | null>();
+  const put = (rel: string, was: string | null, now: string | null) => {
+    const abs = join(root, rel);
+    before.set(abs, was);
+    if (now !== null) write(root, rel, now);
+    return abs;
+  };
+  const files = [
+    put("src/a.ts", "export const a = 1;\n", "export const a = 1;\n// @ts-ignore\nexport const b: number = 'x';\n"),
+    put("src/a.test.ts", "it('one', () => {});\nit('two', () => {});\n", "it.only('one', () => {});\n"),
+    put("tests/test_calc.py", "def test_add():\n    pass\n\ndef test_sub():\n    pass\n", "import pytest\n@pytest.mark.skip\ndef test_add():\n    pass\n"),
+    put("src/stub.py", "", "def f():\n    raise NotImplementedError\n"),
+    put("tests/old.test.ts", "it('x', () => {});\n", null),
+    put("tsconfig.json", '{ "compilerOptions": { "strict": true } }\n', '{ "compilerOptions": {\n "strict": false\n } }\n'),
+    put("src/keys.ts", "", "export const k = 'AKIA" + "Q3EGUNSAFEKEY2P7';\nexport const demo = 'AKIAIOSFODNN7EXAMPLE';\n"),
+    put(".env", null, "TOKEN=abc\n"),
+    put(".env.example", null, "TOKEN=\n"),
+    put("package.json", '{"name":"x","dependencies":{"a":"1"}}', '{"name":"x","dependencies":{"a":"1","b":"2"}}'),
+    put("go.mod", "module m\n\ngo 1.22\n", "module m\n\ngo 1.22\n\nrequire github.com/x/y v1.0.0\n"),
+    put("src/moved.ts", "one\ntwo\n", "two\none\n"),
+  ];
+  write(root, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
+  write(root, "go.sum", "");
+  const found = collectFindings({ root, files, before: (abs) => (before.has(abs) ? before.get(abs)! : SKIP), ignored: (abs) => !abs.endsWith(".env") });
+  const by = (kind: string) => found.filter((f) => f.kind === kind);
+  assert.deepEqual(by("suppression").map((f) => [f.file, f.lines]), [["src/a.ts", [2]]]);
+  assert.deepEqual(by("focus").map((f) => f.file), ["src/a.test.ts"]);
+  assert.ok(by("removed-tests").some((f) => f.file === "src/a.test.ts" && f.what.startsWith("1 test case")));
+  assert.ok(by("removed-tests").some((f) => f.file === "tests/test_calc.py" && f.what.startsWith("1 test case")));
+  assert.deepEqual(by("skip").map((f) => f.file), ["tests/test_calc.py"]);
+  assert.deepEqual(by("stub").map((f) => f.file), ["src/stub.py"]);
+  assert.deepEqual(by("deleted-test").map((f) => f.file), ["tests/old.test.ts"]);
+  assert.deepEqual(by("loosen").map((f) => f.file), ["tsconfig.json"]);
+  const secret = by("secret");
+  assert.equal(secret.length, 1);
+  assert.equal(secret[0]!.lines[0], 1);
+  assert.ok(!formatFinding(secret[0]!).includes("UNSAFEKEY"), "secret value must not be echoed");
+  assert.deepEqual(by("env-file").map((f) => f.file), [".env"]);
+  const locks = by("lockfile");
+  assert.deepEqual(locks.map((f) => [f.file, f.fix]).sort(), [["go.mod", "go mod tidy"], ["package.json", "pnpm install"]]);
+  assert.ok(!found.some((f) => f.file === "src/moved.ts"));
+  assert.equal(found[0]!.kind, "secret");
+  assert.ok(mustFix(secret[0]!) && isWeakening(by("suppression")[0]!));
+  // lockfile updated alongside → no drift; unknown history (SKIP) → never attributed
+  const again = collectFindings({ root, files: [...files, join(root, "pnpm-lock.yaml")], before: (abs) => (before.has(abs) ? before.get(abs)! : SKIP) });
+  assert.ok(!again.some((f) => f.kind === "lockfile" && f.file === "package.json"));
+  assert.equal(collectFindings({ root, files, before: () => SKIP }).filter((f) => f.kind !== "deleted-test").length, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("fixHint turns the check into its writing counterpart for the files it ran on", () => {
+  const c = (cmd: string, label = "format", extra: Partial<Check> = {}): Check => ({ id: "x", tier: "lint", label, cmd, argv: [], cwd: "/r", source: "t", ...extra });
+  assert.equal(fixHint(c("pnpm exec prettier --check --ignore-unknown <files>", "format", { appendFiles: true }), ["src/a.ts", "my file.ts"]), "pnpm exec prettier --write --ignore-unknown src/a.ts 'my file.ts'");
+  assert.equal(fixHint(c("pnpm exec eslint --no-warn-ignored --max-warnings=1000000 <files>", "lint", { appendFiles: true }), ["src/a.ts"]), "pnpm exec eslint --fix --no-warn-ignored src/a.ts");
+  assert.equal(fixHint(c("pnpm exec biome check --no-errors-on-unmatched --reporter=summary <files>", "lint", { appendFiles: true }), ["a.ts"]), "pnpm exec biome check --write --no-errors-on-unmatched a.ts");
+  assert.equal(fixHint(c("uv run ruff check --no-fix --output-format concise <files>", "lint", { appendFiles: true }), ["a.py"]), "uv run ruff check --fix a.py");
+  assert.equal(fixHint(c("uv run ruff format --check --diff <files>", "format", { appendFiles: true }), ["a.py"]), "uv run ruff format a.py");
+  assert.equal(fixHint(c("gofmt -l <files>", "format", { appendFiles: true, unscopedArgs: ["."] }), []), "gofmt -w .");
+  assert.equal(fixHint(c("cargo fmt --check")), "cargo fmt");
+  assert.equal(fixHint(c("cargo fmt -- --check")), "cargo fmt");
+  // script-based checks use the repo's own writing script when there is one
+  assert.equal(fixHint(c("pnpm run format:check"), [], { format: { cmd: "pnpm run format", source: "s" } }), "pnpm run format");
+  assert.equal(fixHint(c("pnpm run lint", "lint"), [], { fix: { cmd: "pnpm run lint:fix", source: "s" } }), "pnpm run lint:fix");
+  assert.equal(fixHint(c("pnpm run lint", "lint"), []), undefined);
+  assert.equal(fixHint(c("tsc --noEmit", "typecheck")), undefined);
+});
+
+test("node detector records only writing scripts as format/fix commands", () => {
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "x", scripts: { format: "prettier --check .", "format:write": "prettier --write .", "lint:fix": "eslint . --fix" } }));
+  write(root, "package-lock.json", "{}");
+  const p = detectProject(root, config);
+  assert.equal(p.commands["format"]?.cmd, "npm run format:write");
+  assert.equal(p.commands["fix"]?.cmd, "npm run lint:fix");
   rmSync(root, { recursive: true, force: true });
 });
 

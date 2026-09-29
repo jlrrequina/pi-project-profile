@@ -130,7 +130,7 @@ export async function runCheck(planned: PlannedCheck, config: ProfileConfig, hoo
   }
   let summary = pruned.lines;
   if (check.failOnOutput && pruned.diagnosticCount === 0) summary = [`files need formatting:`, ...result.stdout.trim().split("\n").slice(0, 30)];
-  return { check, status: "fail", exitCode: result.code, durationMs: result.durationMs, summary, totalLines: pruned.totalLines, logPath, timedOut: result.timedOut, preexisting: pruned.dropped || undefined, diag, scoped: !!scoped };
+  return { check, status: "fail", exitCode: result.code, durationMs: result.durationMs, summary, totalLines: pruned.totalLines, logPath, timedOut: result.timedOut, preexisting: pruned.dropped || undefined, diag, scoped: !!scoped, files: check.appendFiles ? files : undefined };
 }
 
 /**

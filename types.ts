@@ -157,6 +157,8 @@ export interface ProfileConfig {
      * multi-file edits are legitimately red half-way through.
      */
     perTurn: boolean;
+    /** Review the task's changes for added suppressions/skips/stubs, deleted tests, loosened configs, secrets, unignored .env files and stale lockfiles. */
+    guard: boolean;
     /** Checks run concurrently within the syntax/fast/lint tiers (0 = auto: half the cores, max 4). Tests and builds always run one at a time. */
     concurrency: number;
   };
@@ -183,6 +185,7 @@ export const DEFAULT_CONFIG: ProfileConfig = {
     maxOutputLines: 40,
     summarizeOnGiveUp: true,
     perTurn: false,
+    guard: true,
     concurrency: 0,
   },
   profile: {
@@ -248,6 +251,8 @@ export interface CheckRun {
   diag?: Map<string, number>;
   /** The run was narrowed to the changed files (not a full-baseline run). */
   scoped?: boolean;
+  /** Files the check ran on (per-file checks), relative to its cwd. */
+  files?: string[];
 }
 
 export interface GateVerdict {

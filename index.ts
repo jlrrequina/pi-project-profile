@@ -17,17 +17,20 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { basename, isAbsolute, join } from "node:path";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { agentDir, configPath, loadConfig, writeDefaultConfig } from "./config.ts";
 import { findProjectRoot } from "./detect/index.ts";
 import { realpath, tildify, uniq } from "./fs-utils.ts";
-import { availability, effectiveChecks, renderPromptSection, renderReport, tierAllowed } from "./profile/render.ts";
+import { availability, effectiveChecks, effectiveCommands, renderPromptSection, renderReport, tierAllowed } from "./profile/render.ts";
 import { deleteStored, loadOrDetect, profilePath, pruneProfiles, updateUser } from "./profile/store.ts";
 import type { GateVerdict, ProfileConfig, StoredProfile, Tier } from "./types.ts";
 import { collectChanges, displayPath, newTracker, peekChanges, snapshotStart, toolPath, type ChangeTracker } from "./verify/changes.ts";
 import { describeRuns, runGate, type GateHooks } from "./verify/gate.ts";
 import { buildPlan, TIER_ORDER, type PlannedCheck } from "./verify/plan.ts";
 import { logDir, pruneLogs } from "./verify/run.ts";
+import { collectFindings, formatFinding, headContent, isWeakening, mustFix, readForDiff, SKIP, type Before, type Finding } from "./verify/findings.ts";
+import { fixHint } from "./verify/hints.ts";
+import { spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
 
 const VERIFY_MSG = "project-profile/verify";
@@ -50,6 +53,20 @@ interface PromptState {
   finalized: boolean;
   lastSignature?: string;
   mustRun: PlannedCheck[];
+  /** Content of files right before the agent's first write to them in this prompt (null = did not exist). */
+  orig: Map<string, Before>;
+  /** Every file changed during this prompt (absolute). */
+  files: Set<string>;
+  /** Git status when the prompt started (files dirty then are never attributed to the agent). */
+  startSnapshot?: Map<string, string>;
+  /** Diff-guard findings already shown in this prompt. */
+  reported: Set<string>;
+  /** The diff guard already used its one follow-up turn. */
+  findingsContinued: boolean;
+}
+
+function newPrompt(seq: number): PromptState {
+  return { seq, repairRound: 0, pendingRepair: false, finalized: false, mustRun: [], orig: new Map(), files: new Set(), reported: new Set(), findingsContinued: false };
 }
 
 interface SessionState {
@@ -196,6 +213,83 @@ export default function projectProfile(pi: ExtensionAPI) {
     }
   }
 
+  function hintFor(r: GateVerdict["runs"][number]): string | undefined {
+    const prof = profileFor(r.check.cwd) ?? s!.stored;
+    return fixHint(r.check, r.files ?? [], prof ? effectiveCommands(prof) : {});
+  }
+
+  /** Content of a file when the prompt started: captured before the first tool write, else git HEAD for files that were clean then. */
+  function beforeContent(abs: string): Before {
+    const st = s!;
+    if (st.prompt.orig.has(abs)) return st.prompt.orig.get(abs)!;
+    if (!st.gitRoot || !st.prompt.startSnapshot) return SKIP;
+    const rel = relative(st.gitRoot, abs).split(sep).join("/");
+    if (rel.startsWith("..") || st.prompt.startSnapshot.has(rel)) return SKIP; // outside the repo, or already dirty when the task began
+    return headContent(st.gitRoot, rel);
+  }
+
+  function gitIgnored(abs: string): boolean | undefined {
+    const g = s!.gitRoot;
+    if (!g) return undefined;
+    const r = spawnSync("git", ["check-ignore", "-q", "--", relative(g, abs).split(sep).join("/")], { cwd: g, timeout: 5000 });
+    return r.status === 0 ? true : r.status === 1 ? false : undefined;
+  }
+
+  /** New diff-guard findings for everything this prompt changed so far. */
+  function freshFindings(): Finding[] {
+    const st = s!;
+    if (!st.config.verify.guard || st.prompt.files.size === 0) return [];
+    const all = collectFindings({ root: st.root, gitRoot: st.gitRoot, files: Array.from(st.prompt.files).sort(), before: beforeContent, ignored: gitIgnored });
+    const fresh = all.filter((f) => !st.prompt.reported.has(f.key));
+    for (const f of fresh) st.prompt.reported.add(f.key);
+    return fresh;
+  }
+
+  function summarizeKinds(fs: Finding[]): string {
+    const n = (k: Finding["kind"][]) => fs.filter((f) => k.includes(f.kind)).reduce((a, f) => a + Math.max(1, f.lines.length), 0);
+    const parts: string[] = [];
+    const add = (count: number, one: string, many: string) => count && parts.push(count === 1 ? one : `${count} ${many}`);
+    add(n(["secret"]), "a possible secret", "possible secrets");
+    add(n(["env-file"]), "an unignored .env file", "unignored .env files");
+    add(n(["lockfile"]), "a stale lockfile", "stale lockfiles");
+    add(n(["focus"]), "a focused test (.only)", "focused tests");
+    add(n(["suppression"]), "a check suppression", "check suppressions");
+    add(n(["skip"]), "a skipped test", "skipped tests");
+    add(n(["stub"]), "a stub", "stubs");
+    add(n(["loosen"]), "a loosened check config", "loosened check configs");
+    add(n(["deleted-test", "removed-tests"]), "removed tests", "removals of tests");
+    return parts.join(", ");
+  }
+
+  /** Report findings: secrets/lockfile/.only always get one follow-up turn; weakening only when it happened while checks were failing. */
+  function findingsDraft(ctx: ExtensionContext, found: Finding[], failing: boolean): { draft: SessionBoundaryDraft; cont: boolean } | undefined {
+    const st = s!;
+    if (found.length === 0) return undefined;
+    const fix = found.some(mustFix);
+    const gamed = failing && found.some(isWeakening);
+    const cont = (fix || gamed) && !st.prompt.findingsContinued;
+    if (cont) st.prompt.findingsContinued = true;
+    const summary = summarizeKinds(found);
+    const secrets = found.filter((f) => f.kind === "secret" || f.kind === "env-file");
+    notify(ctx, `verify: this task added ${summary}${secrets.length ? ` — check ${uniq(secrets.map((f) => f.file)).join(", ")} before committing` : ""}`, secrets.length ? "warning" : "info");
+    debug("findings", { seq: st.prompt.seq, cont, found: found.map((f) => ({ kind: f.kind, file: f.file, lines: f.lines })) });
+    const lines = ["[verification] review of this task's changes:", ...found.map(formatFinding), ""];
+    if (gamed) lines.push("You added these while verification was failing. Remove them and fix the underlying problem; if one is genuinely needed, keep it and justify it in your final message to the user.");
+    else if (cont) lines.push("Fix these before finishing: run the lockfile command, remove `.only`, move credentials into environment variables or untracked config (unless the user explicitly asked otherwise) — or explain in your final message why they must stay.");
+    else lines.push("(Shown to the user. No automatic follow-up.)");
+    return { draft: { type: "custom_message", customType: VERIFY_MSG, content: lines.join("\n"), display: true, details: { seq: st.prompt.seq, kind: "finding", headline: `review: ${summary}` } }, cont };
+  }
+
+  /** Assemble a boundary result: earlier handlers' entries + ours (+ findings), continuing when any part asks to. */
+  function boundary(prior: SessionBoundaryDraft[], drafts: SessionBoundaryDraft[], cont: boolean, f?: { draft: SessionBoundaryDraft; cont: boolean }) {
+    if (f) {
+      drafts.push(f.draft);
+      cont = cont || f.cont;
+    }
+    if (drafts.length === 0) return undefined;
+    return cont ? { entries: [...prior, ...drafts], continue: true } : { entries: [...prior, ...drafts] };
+  }
+
   function whereOf(cwd: string): string {
     return cwd === s!.root ? "" : ` in ${displayPath(s!.root, cwd)}`;
   }
@@ -228,6 +322,8 @@ export default function projectProfile(pi: ExtensionAPI) {
       const shown = r.summary.length;
       if (r.totalLines > shown) lines.push(`(${r.totalLines - shown} more lines${r.logPath ? `; full log: ${r.logPath}` : ""})`);
       else if (r.logPath) lines.push(`(full log: ${r.logPath})`);
+      const hint = hintFor(r);
+      if (hint) lines.push(`Auto-fix available: \`${hint}\` — run it, then end your turn (verification re-runs).`);
       if (r.preexisting) lines.push(`(${r.preexisting} other diagnostic line${r.preexisting === 1 ? "" : "s"} of this check already failed before this task and ${r.preexisting === 1 ? "is" : "are"} hidden — leave ${r.preexisting === 1 ? "it" : "them"} alone unless asked.)`);
     }
     if (passed.length) lines.push(`Passed: ${uniq(passed).join(", ")}.`);
@@ -297,7 +393,7 @@ export default function projectProfile(pi: ExtensionAPI) {
   pi.registerMessageRenderer(VERIFY_MSG, (message, { expanded, outputPad }, theme) => {
     const details = message.details as { kind?: string; headline?: string } | undefined;
     const kind = details?.kind ?? "info";
-    const color = kind === "failure" ? "error" : kind === "giveup" || kind === "perturn" ? "warning" : "success";
+    const color = kind === "failure" ? "error" : kind === "giveup" || kind === "perturn" || kind === "finding" ? "warning" : "success";
     const head = `${theme.fg(color, "[verify]")} ${details?.headline ?? ""}`;
     const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
     box.addChild(new Text(head, 0, 0));
@@ -334,7 +430,7 @@ export default function projectProfile(pi: ExtensionAPI) {
       broken: new Map(),
       notifiedBroken: new Set(),
       askedThisSession: new Set(),
-      prompt: { seq: 0, repairRound: 0, pendingRepair: false, finalized: false, mustRun: [] },
+      prompt: newPrompt(0),
       gateRunning: false,
       abort: new AbortController(),
       supersededIds: new Set(),
@@ -376,12 +472,15 @@ export default function projectProfile(pi: ExtensionAPI) {
   pi.on("before_agent_start", async (event, ctx) => {
     if (!s) return;
     // new user prompt → new repair budget
-    s.prompt = { seq: s.prompt.seq + 1, repairRound: 0, pendingRepair: false, finalized: false, mustRun: [] };
+    s.prompt = newPrompt(s.prompt.seq + 1);
     s.turnFiles.clear();
     s.turnBash = false;
     // Failures recorded before this prompt are pre-existing for the whole prompt.
     s.promptBaseline = new Map(s.lastDiag);
-    if (verifyEnabled()) await snapshotStart(s.tracker);
+    if (verifyEnabled()) {
+      await snapshotStart(s.tracker);
+      s.prompt.startSnapshot = s.tracker.snapshot ? new Map(s.tracker.snapshot) : undefined;
+    }
     if (!s.config.profile.inject || !s.stored) return;
     const loaded = (event.systemPromptOptions.contextFiles ?? []).map((f) => f.path);
     const key = `${s.stored.updatedAt}|${verifyEnabled()}|${loaded.join(",")}`;
@@ -394,6 +493,14 @@ export default function projectProfile(pi: ExtensionAPI) {
   });
 
   // ------------------------------------------------------------------ change tracking
+  const isMutationTool = (name: string) => name === "write" || name === "edit" || (/edit|write|patch|apply|replace|insert|move|rename|delete|create/i.test(name) && !/read|grep|find|search|list|ls|describe|status/i.test(name));
+  pi.on("tool_call", async (event, ctx) => {
+    if (!s || !s.config.verify.guard || !isMutationTool(event.toolName)) return;
+    const input = event.input as Record<string, unknown>;
+    const p = toolPath(ctx.cwd, input.path ?? input.file ?? input.filePath);
+    if (p && !s.prompt.orig.has(p)) s.prompt.orig.set(p, readForDiff(p));
+  });
+
   pi.on("tool_result", async (event, ctx) => {
     if (!s) return;
     const st = s;
@@ -431,6 +538,8 @@ export default function projectProfile(pi: ExtensionAPI) {
     st.gateRunning = true;
     try {
       const { files, unknownChanges, gitDetected } = await collectChanges(st.tracker);
+      for (const f of files) st.prompt.files.add(f);
+      const found = files.length ? freshFindings() : [];
       debug("settle", { seq: st.prompt.seq, round: st.prompt.repairRound, files, gitDetected, unknownChanges, pendingRepair: st.prompt.pendingRepair, finalized: st.prompt.finalized });
       if (files.length === 0 && !unknownChanges) {
         if (st.prompt.pendingRepair && !st.prompt.finalized) {
@@ -445,7 +554,7 @@ export default function projectProfile(pi: ExtensionAPI) {
       }
       const plan = await buildGatePlan(files, { unscoped: unknownChanges && files.length === 0, mustRun: st.prompt.mustRun });
       const total = TIER_ORDER.reduce((n, t) => n + (plan.byTier.get(t)?.length ?? 0), 0);
-      if (total === 0) return;
+      if (total === 0) return boundary(event.entries, [], false, findingsDraft(ctx, found, st.prompt.repairRound > 0));
       const hooks = makeHooks(ctx, st.abort.signal, { interactive: true });
       setStatus(ctx, "⏳ verifying…");
       const verdict = await runGate(plan, st.config, hooks);
@@ -463,10 +572,11 @@ export default function projectProfile(pi: ExtensionAPI) {
         }
         const known = knownNote(ctx, verdict);
         if (known) drafts.push(known);
+        const failedEarlier = st.prompt.repairRound > 0;
         st.prompt.pendingRepair = false;
         st.prompt.mustRun = [];
         // Boundary results replace the draft chain: always carry earlier handlers' entries.
-        return drafts.length ? { entries: [...event.entries, ...drafts] } : undefined;
+        return boundary(event.entries, drafts, false, findingsDraft(ctx, found, failedEarlier));
       }
       if (verdict.status === "red") {
         const failingPlanned: PlannedCheck[] = [];
@@ -475,7 +585,7 @@ export default function projectProfile(pi: ExtensionAPI) {
         setStatus(ctx, `✗ ${failingLabels}`);
         if (st.prompt.finalized) {
           notify(ctx, `verify: still failing (${failingLabels}); automatic repair already stopped for this prompt`, "warning");
-          return;
+          return boundary(event.entries, [], false, findingsDraft(ctx, found, true));
         }
         const drafts = supersedeDrafts(ctx);
         const round = st.prompt.repairRound + 1;
@@ -490,7 +600,7 @@ export default function projectProfile(pi: ExtensionAPI) {
           notify(ctx, `verify: ${stopReason} — ${failingLabels} still failing; see the transcript`, "warning");
           const summarize = st.config.verify.summarizeOnGiveUp;
           drafts.push({ type: "custom_message", customType: VERIFY_MSG, content: giveUpMessage(verdict, stopReason, summarize), display: true, details: { seq: st.prompt.seq, kind: "giveup", headline: `stopped — ${stopReason} (${failingLabels})` } });
-          return { entries: [...event.entries, ...drafts], continue: summarize };
+          return boundary(event.entries, drafts, summarize, findingsDraft(ctx, found, true));
         }
         st.prompt.repairRound = round;
         st.prompt.lastSignature = verdict.signature;
@@ -499,11 +609,11 @@ export default function projectProfile(pi: ExtensionAPI) {
         debug("repair", { seq: st.prompt.seq, round, failing: failingLabels });
         notify(ctx, `verify: ${failingLabels} failed — sending the agent back (round ${round}/${max})`, "info");
         drafts.push({ type: "custom_message", customType: VERIFY_MSG, content: failureMessage(verdict, round, max), display: true, details: { seq: st.prompt.seq, kind: "failure", headline: `${failingLabels} failed — round ${round}/${max}` } });
-        return { entries: [...event.entries, ...drafts], continue: true };
+        return boundary(event.entries, drafts, true, findingsDraft(ctx, found, true));
       }
       // env / skipped
       setStatus(ctx, verdict.status === "env" ? "⚠ checks unavailable" : "– nothing to verify");
-      return;
+      return boundary(event.entries, [], false, findingsDraft(ctx, found, st.prompt.repairRound > 0));
     } catch (err) {
       notify(ctx, `verify: internal error — ${(err as Error).message}`, "error");
       return;
@@ -523,6 +633,8 @@ export default function projectProfile(pi: ExtensionAPI) {
       lines.push(...r.summary.slice(0, Math.max(8, Math.floor(st.config.verify.maxOutputLines / 2))));
       lines.push("```");
       if (r.totalLines > r.summary.length && r.logPath) lines.push(`(full log: ${r.logPath})`);
+      const hint = hintFor(r);
+      if (hint) lines.push(`Auto-fix available: \`${hint}\``);
     }
     lines.push("Informational: you are mid-task, so failures from work still in progress are expected. Address them as you continue; the full verification runs when you finish and will send a repair request if anything still fails.");
     return lines.join("\n");

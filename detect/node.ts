@@ -266,8 +266,8 @@ export function detectNode(b: Builder): void {
   };
   const readOnly = (body: string) => !MUTATING_RE.test(body) && !WATCH_RE.test(body);
   const notWatch = (body: string) => !WATCH_RE.test(body);
-  const pick = (key: string, names: string[], contentRe?: RegExp): string | undefined => {
-    const n = find(names, contentRe);
+  const pick = (key: string, names: string[], contentRe?: RegExp, usable?: (s: string) => boolean): string | undefined => {
+    const n = find(names, contentRe, usable);
     if (n) b.command(key, run(n), `package.json scripts.${n}`);
     return n;
   };
@@ -282,7 +282,10 @@ export function detectNode(b: Builder): void {
   pick("build", ["build", "compile", "bundle", "build:all"]);
   pick("dev", ["dev", "start:dev", "serve", "develop", "watch"]);
   if (!b.commands["dev"] && scripts["start"]) b.command("run", run("start"), "package.json scripts.start");
-  pick("format", ["format", "fmt", "prettier", "format:write", "format:fix"]);
+  // Only scripts that rewrite files count as the format/fix commands (used for fix hints); `--check` scripts are checks.
+  const writes = (body: string) => !/--check\b|--list-different\b|--verify-no-changes\b|(^|\s)-l(\s|$)/.test(body) && !WATCH_RE.test(body);
+  pick("format", ["format", "fmt", "prettier", "format:write", "format:fix"], undefined, writes);
+  pick("fix", ["lint:fix", "fix", "lint-fix", "fix:lint", "lint:write", "check:fix", "fix:all"], /--fix|--write|--apply|\bfix\b/, writes);
   pick("docs", ["docs", "docs:dev", "storybook"]);
   pick("migrate", ["migrate", "db:migrate", "prisma:migrate"]);
   if (b.hasFile("prisma/schema.prisma")) b.add("Prisma schema (prisma/schema.prisma)");
