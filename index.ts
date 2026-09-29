@@ -17,7 +17,7 @@ import { Type } from "@earendil-works/pi-ai";
 import type { ExtensionAPI, ExtensionContext, SessionBoundaryDraft } from "@earendil-works/pi-coding-agent";
 import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join } from "node:path";
 import { agentDir, configPath, loadConfig, writeDefaultConfig } from "./config.ts";
 import { findProjectRoot } from "./detect/index.ts";
 import { realpath, tildify, uniq } from "./fs-utils.ts";
@@ -535,7 +535,7 @@ export default function projectProfile(pi: ExtensionAPI) {
     }
     st.gateRunning = true;
     try {
-      const files = (opts.files ?? []).map((f) => (f.startsWith("/") ? f : join(ctx.cwd, f))).map(realpath);
+      const files = (opts.files ?? []).map((f) => (isAbsolute(f) ? f : join(ctx.cwd, f))).map(realpath);
       const plan = await buildGatePlan(files, { unscoped: files.length === 0 });
       if (opts.tiers) for (const t of TIER_ORDER) if (!opts.tiers.includes(t)) plan.byTier.set(t, []);
       const hooks = makeHooks(ctx, st.abort.signal, { interactive: opts.interactive });

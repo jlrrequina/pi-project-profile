@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../config.ts";
 import { composeServices, parseToolVersions, tomlHasTable, tomlKeys, tomlSections } from "../detect/context.ts";
@@ -22,6 +22,20 @@ import { looksLikeDirective } from "../detect/repo.ts";
 import { NODE_BIN_PREFIX, PY_PREFIX } from "../types.ts";
 
 const { config } = loadConfig("/nonexistent-dir-for-defaults");
+
+const IS_WIN = process.platform === "win32";
+/** Path of `p` below `root`, with forward slashes (platform-neutral assertions). */
+function relOf(root: string, p: string): string {
+  return p.slice(root.length + 1).split(sep).join("/");
+}
+function real(p: string): string {
+  const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
+  return fs.realpathSync(p);
+}
+/** argv for a Node child running a snippet (portable replacement for `sh -c`). */
+function nodeArgv(code: string): string[] {
+  return [process.execPath, "-e", code];
+}
 
 function tmp(): string {
   return mkdtempSync(join(tmpdir(), "pp-test-"));
@@ -54,8 +68,8 @@ test("parseToolVersions / composeServices", () => {
 test("expandDirGlob", () => {
   const root = tmp();
   for (const d of ["packages/a", "packages/b", "apps/web", "packages/.hidden", "node_modules/x"]) mkdirSync(join(root, d), { recursive: true });
-  assert.deepEqual(expandDirGlob(root, "packages/*").map((p) => p.slice(root.length + 1)), ["packages/a", "packages/b"]);
-  assert.deepEqual(expandDirGlob(root, "apps/**").map((p) => p.slice(root.length + 1)), ["apps", "apps/web"]);
+  assert.deepEqual(expandDirGlob(root, "packages/*").map((p) => relOf(root, p)), ["packages/a", "packages/b"]);
+  assert.deepEqual(expandDirGlob(root, "apps/**").map((p) => relOf(root, p)), ["apps", "apps/web"]);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -172,7 +186,7 @@ test("findProjectRoot walks up to nearest manifest but not past git root; neares
   write(root, "packages/a/package.json", "{}");
   mkdirSync(join(root, "packages/a/src/deep"), { recursive: true });
   const r = findProjectRoot(join(root, "packages/a/src/deep"));
-  assert.equal(r.root.replace("/private", ""), join(root, "packages/a").replace("/private", ""));
+  assert.equal(r.root, real(join(root, "packages/a")));
   assert.equal(nearestProjectDir(join(root, "packages/a/src/deep/x.ts"), root), join(root, "packages/a"));
   assert.equal(nearestProjectDir(join(root, "docs/x.md"), root), root);
   rmSync(root, { recursive: true, force: true });
@@ -181,7 +195,9 @@ test("findProjectRoot walks up to nearest manifest but not past git root; neares
 test("findProjectRoot never resolves to the home directory (stray ~/package.json) nor to a dotfiles git root at ~", () => {
   const fakeHome = tmp();
   const prevHome = process.env.HOME;
+  const prevProfile = process.env.USERPROFILE;
   process.env.HOME = fakeHome;
+  process.env.USERPROFILE = fakeHome; // os.homedir() on Windows
   try {
     write(fakeHome, "package.json", "{}");
     mkdirSync(join(fakeHome, "Documents/Code/wrapper/app"), { recursive: true });
@@ -202,6 +218,8 @@ test("findProjectRoot never resolves to the home directory (stray ~/package.json
     assert.equal(findProjectRoot(fakeHome).root, realpathOf(fakeHome));
   } finally {
     process.env.HOME = prevHome;
+    if (prevProfile === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prevProfile;
     rmSync(fakeHome, { recursive: true, force: true });
   }
 });
@@ -261,6 +279,9 @@ test("prompt section is static and bounded", () => {
   assert.ok(a.includes("Use tabs."));
   assert.ok(a.includes("asks once before running tests"));
   assert.ok(a.length < 4000);
+  // π reports loaded context files as OS paths (backslashes on Windows): still recognised, not inlined twice
+  const win = renderPromptSection(stored, config, { verifyEnabled: true, piLoadedContextFiles: ["C:\\work\\x\\.cursorrules"] });
+  assert.ok(win.includes(".cursorrules (loaded)") && !win.includes("### .cursorrules"));
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -359,19 +380,19 @@ test("pnpm workspace: package files run the package's own typecheck with the wor
   assert.equal(a.checks.find((c) => c.id === "node:typecheck")?.coversWorkspace, undefined);
   // only a package file changed → only that package's typecheck, in its directory
   const p1 = buildPlan([join(root, "packages/a/src/index.ts")], opts).byTier.get("fast")!;
-  assert.deepEqual(p1.map((p) => [p.check.cwd.slice(root.length + 1), p.check.cmd]), [["packages/a", "pnpm run typecheck"]]);
+  assert.deepEqual(p1.map((p) => [relOf(root, p.check.cwd), p.check.cmd]), [["packages/a", "pnpm run typecheck"]]);
   // root file + package file → the workspace-wide root run covers the package; no duplicate
   const p2 = buildPlan([join(root, "packages/a/src/index.ts"), join(root, "scripts/tool.ts")], opts).byTier.get("fast")!;
-  assert.deepEqual(p2.map((p) => [p.check.cwd.slice(root.length + 1), p.check.cmd]), [["", "pnpm run typecheck"]]);
+  assert.deepEqual(p2.map((p) => [relOf(root, p.check.cwd), p.check.cmd]), [["", "pnpm run typecheck"]]);
   // lint at the root is not workspace-wide (plain eslint .) → a package lint of its own would not be deduped (packages have none here); the root lint runs for the root file
   assert.ok(buildPlan([join(root, "scripts/tool.ts")], opts).byTier.get("lint")!.some((p) => p.check.id === "node:lint" && p.check.cwd === root));
   // repair round: the failing workspace-wide root run is a must-run and still covers the package's fresh run
   const rootTc = { check: profileFor(root)!.detected.checks.find((c) => c.id === "node:typecheck")!, files: [] };
   const p4 = buildPlan([join(root, "packages/a/src/index.ts")], { ...opts, mustRun: [rootTc] }).byTier.get("fast")!;
-  assert.deepEqual(p4.map((p) => p.check.cwd.slice(root.length + 1)), [""]);
+  assert.deepEqual(p4.map((p) => relOf(root, p.check.cwd)), [""]);
   // two packages changed → two package-level runs, still no root run
   const p3 = buildPlan([join(root, "packages/a/src/index.ts"), join(root, "packages/b/src/index.ts")], opts).byTier.get("fast")!;
-  assert.deepEqual(p3.map((p) => p.check.cwd.slice(root.length + 1)).sort(), ["packages/a", "packages/b"]);
+  assert.deepEqual(p3.map((p) => relOf(root, p.check.cwd)).sort(), ["packages/a", "packages/b"]);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -424,7 +445,7 @@ test("windows: PATHEXT lookup, .cmd shims in node_modules/.bin, venv Scripts/, s
   Object.defineProperty(process, "platform", { value: "win32", configurable: true });
   try {
     const started = Date.now();
-    const slow = await runCommand(["/bin/sh", "-c", "sleep 30"], { cwd: tmpdir(), timeoutMs: 300 });
+    const slow = await runCommand(nodeArgv("setTimeout(() => {}, 30000)"), { cwd: tmpdir(), timeoutMs: 300 });
     assert.ok(slow.timedOut);
     assert.ok(Date.now() - started < 5000);
   } finally {
@@ -434,12 +455,12 @@ test("windows: PATHEXT lookup, .cmd shims in node_modules/.bin, venv Scripts/, s
 
 // ---------------------------------------------------------------- runner
 test("runCommand: exit codes, timeout kills process group, output capture", async () => {
-  const ok = await runCommand(["sh", "-c", "echo out; echo err 1>&2; exit 3"], { cwd: tmpdir(), timeoutMs: 5000 });
+  const ok = await runCommand(nodeArgv("console.log('out'); console.error('err'); process.exit(3)"), { cwd: tmpdir(), timeoutMs: 5000 });
   assert.equal(ok.code, 3);
   assert.equal(ok.stdout.trim(), "out");
   assert.equal(ok.stderr.trim(), "err");
   const started = Date.now();
-  const slow = await runCommand(["sh", "-c", "sleep 30"], { cwd: tmpdir(), timeoutMs: 300 });
+  const slow = await runCommand(nodeArgv("setTimeout(() => {}, 30000)"), { cwd: tmpdir(), timeoutMs: 300 });
   assert.ok(slow.timedOut);
   assert.ok(Date.now() - started < 5000);
   const missing = await runCommand(["/definitely/not/here"], { cwd: tmpdir(), timeoutMs: 1000 });
@@ -459,10 +480,12 @@ test("resolveArgv binds node_modules/.bin and python tools at run time", () => {
   const ok = resolveArgv({ ...base, cwd: nested, argv: [`${NODE_BIN_PREFIX}tsc`, "--noEmit"] }, ["src/x.ts"]);
   assert.deepEqual(ok.argv, [join(root, "node_modules", ".bin", "tsc"), "--noEmit", "src/x.ts"]);
   // python: venv wins over PATH when present
-  mkdirSync(join(root, ".venv", "bin"), { recursive: true });
-  writeFileSync(join(root, ".venv", "bin", "mypy"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const venvBin = join(root, ".venv", IS_WIN ? "Scripts" : "bin");
+  const mypy = join(venvBin, IS_WIN ? "mypy.exe" : "mypy");
+  mkdirSync(venvBin, { recursive: true });
+  writeFileSync(mypy, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   const py = resolveArgv({ ...base, argv: [`${PY_PREFIX}pip:mypy`, "--strict"] });
-  assert.deepEqual(py.argv, [join(root, ".venv", "bin", "mypy"), "--strict"]);
+  assert.deepEqual(py.argv, [mypy, "--strict"]);
   const nope = resolveArgv({ ...base, argv: [`${PY_PREFIX}pip:definitely-not-a-tool-xyz`] });
   assert.ok(nope.missing);
   const plain = resolveArgv({ ...base, argv: ["/no/such/binary", "a"] });
@@ -499,16 +522,16 @@ test("peekChanges reports files changed since the prompt snapshot without consum
   assert.deepEqual(await peekChanges(t), []);
   write(root, "b.txt", "2"); // a bash-style edit (not tool-tracked)
   const peeked = await peekChanges(t);
-  assert.deepEqual(peeked!.map((f) => f.slice(root.length + 1)), ["b.txt"]);
+  assert.deepEqual(peeked!.map((f) => relOf(root, f)), ["b.txt"]);
   const collected = await collectChanges(t);
-  assert.deepEqual(collected.files.map((f) => f.slice(root.length + 1)), ["b.txt"]);
+  assert.deepEqual(collected.files.map((f) => relOf(root, f)), ["b.txt"]);
   assert.equal(collected.gitDetected, 1);
   rmSync(root, { recursive: true, force: true });
 });
 
 test("toolPath resolves relative and absolute tool arguments, ignores non-strings", () => {
-  assert.equal(toolPath("/repo", "src/a.ts"), "/repo/src/a.ts");
-  assert.equal(toolPath("/repo", "/elsewhere/b.ts"), "/elsewhere/b.ts");
+  assert.equal(toolPath("/repo", "src/a.ts"), resolve("/repo", "src/a.ts"));
+  assert.equal(toolPath("/repo", "/elsewhere/b.ts"), resolve("/elsewhere/b.ts"));
   assert.equal(toolPath("/repo", ""), undefined);
   assert.equal(toolPath("/repo", 42), undefined);
 });
@@ -579,6 +602,8 @@ test("scoped test runs end to end: detector → plan (files kept, mustRun merged
   mkdirSync(join(root, "node_modules", ".bin"), { recursive: true });
   // fake vitest: print its argv and fail, so the args land in the pruned summary
   writeFileSync(join(root, "node_modules", ".bin", "vitest"), '#!/bin/sh\necho "FAIL argv: $*"\nexit 1\n', { mode: 0o755 });
+  // Windows resolves the .cmd shim (as npm/pnpm install them) and runs it through cmd.exe
+  writeFileSync(join(root, "node_modules", ".bin", "vitest.cmd"), "@echo FAIL argv: %*\r\n@exit /b 1\r\n", { mode: 0o755 });
   const stored: StoredProfile = { detected: detectProject(root, config), user: emptyUserData(), updatedAt: "" };
   const test = effectiveChecks(stored).find((c) => c.id === "node:test")!;
   assert.equal(test.scope?.kind, "vitest");

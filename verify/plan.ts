@@ -1,4 +1,4 @@
-import { basename, relative, sep } from "node:path";
+import { basename, isAbsolute, relative, sep } from "node:path";
 import { nearestProjectDir } from "../detect/index.ts";
 import { ext } from "../fs-utils.ts";
 import type { Check, StoredProfile, Tier } from "../types.ts";
@@ -96,7 +96,7 @@ export function buildPlan(
       const matching = check.exts && check.exts.length > 0 ? files.filter((f) => check.exts!.includes(ext(f))) : sourceFiles;
       if (!opts.unscoped && matching.length === 0) continue;
       if (!opts.unscoped && check.tier !== "syntax" && sourceFiles.length === 0 && !(check.exts ?? []).some((e) => e === ".json" || e === ".yml" || e === ".yaml")) continue;
-      const rel = matching.map((f) => relative(check.cwd, f).split(sep).join("/")).filter((r) => !r.startsWith(".."));
+      const rel = matching.map((f) => relative(check.cwd, f)).filter((r) => !r.startsWith("..") && !isAbsolute(r)).map((r) => r.split(sep).join("/"));
       if (check.appendFiles && rel.length === 0) {
         if (!opts.unscoped || !check.unscopedArgs) continue;
         addPlanned(check, [...check.unscopedArgs]);

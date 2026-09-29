@@ -1,5 +1,5 @@
 import { homedir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, sep } from "node:path";
 import { exists, findGitRoot, findUp, realpath } from "../fs-utils.ts";
 import type { DetectedProfile, ProfileConfig, Tier } from "../types.ts";
 import { Builder } from "./context.ts";
@@ -123,7 +123,7 @@ export function findProjectRoot(cwd: string): { root: string; gitRoot?: string }
   // A dotfiles repo rooted at ~ is not a project either; ignore it entirely.
   const foundGit = findGitRoot(start);
   const gitRoot = foundGit === home ? undefined : foundGit;
-  const belowHome = start !== home && start.startsWith(home + "/");
+  const belowHome = start !== home && start.startsWith(home + sep);
   const stop = gitRoot ?? (belowHome ? home : undefined);
   const nearest = findUp(start, (d) => d !== home && isProjectDir(d), stop);
   const root = nearest ?? gitRoot ?? start;
