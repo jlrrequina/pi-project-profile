@@ -71,6 +71,8 @@ export interface Check {
   failOnOutput?: boolean;
   /** Narrow the run to the changed files when possible (see verify/scope.ts). */
   scope?: ScopeSpec;
+  /** Narrow, PATH-detected linter for one file type (shellcheck, hadolint): never counts as the project's own lint/typecheck when choosing CI or task-runner checks. */
+  incidental?: boolean;
   /** Runs across the whole workspace (turbo/nx/pnpm -r/tsc -b …): package-level checks with the same label are redundant when this runs. */
   coversWorkspace?: boolean;
   timeoutMs?: number;

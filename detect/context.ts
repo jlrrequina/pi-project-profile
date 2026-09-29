@@ -45,6 +45,8 @@ export class Builder {
   services: string[] = [];
   monorepo?: { kind: string; packages?: number; tool?: string };
   generated: string[] = [];
+  /** Tracked-file extension histogram (git ls-files), set before detectors run. */
+  extCounts: Record<string, number> = {};
   fingerprintFiles = new Set<string>();
   private textCache = new Map<string, string | undefined>();
 
@@ -129,6 +131,10 @@ export class Builder {
     if (this.checks.some((x) => x.id === c.id)) return;
     const timeoutMs = c.timeoutMs ?? this.opts.timeouts[c.tier];
     this.checks.push({ ...c, cwd: c.cwd ?? this.root, timeoutMs });
+  }
+  /** Is there already a project-level check for this tier+label? Incidental single-file-type linters do not count. */
+  hasCheckFor(tier: Tier, label: string): boolean {
+    return this.checks.some((c) => c.tier === tier && c.label === label && !c.incidental);
   }
   hasCheck(tierOrLabel: string): boolean {
     return this.checks.some((c) => c.tier === tierOrLabel || c.label === tierOrLabel);

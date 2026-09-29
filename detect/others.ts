@@ -521,10 +521,12 @@ export function detectInfra(b: Builder): void {
   if (b.hasFile("supabase/config.toml")) b.add("Supabase (supabase/)");
   if (b.hasFile("firebase.json")) b.add("Firebase");
   if (b.hasFile("amplify.yml") || b.hasDir("amplify")) b.add("Amplify");
-  // shell scripts
-  if (b.which("bash")) b.check({ id: "sh:syntax", tier: "syntax", label: "syntax", cmd: "bash -n <file>", argv: ["bash", "-n"], appendFiles: true, source: "bash", exts: [".sh", ".bash"], requires: { bin: "bash" }, tool: "bash" });
-  if (b.which("shellcheck")) b.check({ id: "sh:shellcheck", tier: "lint", label: "lint", cmd: "shellcheck <files>", argv: ["shellcheck", "--format=gcc"], appendFiles: true, source: "shellcheck on PATH", exts: [".sh", ".bash"], requires: { bin: "shellcheck" }, tool: "shellcheck" });
-  if (b.which("hadolint") && (b.hasFile("Dockerfile") || b.hasFile(".hadolint.yaml"))) b.check({ id: "docker:hadolint", tier: "lint", label: "lint", cmd: "hadolint <files>", argv: ["hadolint", "--no-color"], appendFiles: true, source: "hadolint on PATH", exts: [".dockerfile"], requires: { bin: "hadolint" }, tool: "hadolint" });
+  // shell scripts: only when the repository has some (keeps the profile independent of what happens to be installed)
+  const isShell = (f: string) => /\.(sh|bash)$/.test(f);
+  const shellFiles = (b.extCounts[".sh"] ?? 0) + (b.extCounts[".bash"] ?? 0) + b.rootFiles(/\.(sh|bash)$/).length + ["scripts", "script", "bin", "tools"].reduce((n, d) => n + b.files(d).filter(isShell).length, 0);
+  if (shellFiles > 0 && b.which("bash")) b.check({ id: "sh:syntax", tier: "syntax", label: "syntax", cmd: "bash -n <file>", argv: ["bash", "-n"], appendFiles: true, source: "bash", exts: [".sh", ".bash"], requires: { bin: "bash" }, tool: "bash" });
+  if (shellFiles > 0 && b.which("shellcheck")) b.check({ id: "sh:shellcheck", tier: "lint", label: "lint", cmd: "shellcheck <files>", argv: ["shellcheck", "--format=gcc"], appendFiles: true, source: "shellcheck on PATH", exts: [".sh", ".bash"], requires: { bin: "shellcheck" }, tool: "shellcheck", incidental: true });
+  if (b.which("hadolint") && (b.hasFile("Dockerfile") || b.hasFile(".hadolint.yaml"))) b.check({ id: "docker:hadolint", tier: "lint", label: "lint", cmd: "hadolint <files>", argv: ["hadolint", "--no-color"], appendFiles: true, source: "hadolint on PATH", exts: [".dockerfile"], requires: { bin: "hadolint" }, tool: "hadolint", incidental: true });
   // Lua
   if (b.rootFiles(/\.rockspec$/).length || b.hasFile(".luarc.json") || b.hasFile("init.lua") && b.hasDir("lua")) {
     b.lang("Lua");

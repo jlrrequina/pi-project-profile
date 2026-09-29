@@ -91,11 +91,12 @@ export async function runCheck(planned: PlannedCheck, config: ProfileConfig, hoo
   const { files } = planned;
   const internal = runInternal(planned.check, files);
   if (internal) return internal;
-  const unavailable = availability(planned.check);
-  if (unavailable) return { check: planned.check, status: "env", exitCode: null, durationMs: 0, summary: [], totalLines: 0, reason: unavailable };
   // Narrow test runs to the changed files when the runner supports it; the head stays late-bound.
   const scoped = planned.check.scope && files.length > 0 ? scopeCheck(planned.check, files) : undefined;
   const check: Check = scoped ? { ...planned.check, argv: scoped.argv, cmd: scoped.cmd } : planned.check;
+  // Availability of what will actually run: `vitest related` needs node_modules/.bin/vitest, not the package manager.
+  const unavailable = availability(check);
+  if (unavailable) return { check, status: "env", exitCode: null, durationMs: 0, summary: [], totalLines: 0, reason: unavailable };
   const resolved = resolveArgv(check, check.appendFiles ? files : []);
   if (resolved.missing) return { check, status: "env", exitCode: null, durationMs: 0, summary: [], totalLines: 0, reason: resolved.missing };
   const argv = resolved.argv;

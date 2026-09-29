@@ -6,7 +6,7 @@ import { test } from "node:test";
 import { loadConfig } from "../config.ts";
 import { composeServices, parseToolVersions, tomlHasTable, tomlKeys, tomlSections } from "../detect/context.ts";
 import { detectProject, findProjectRoot, nearestProjectDir } from "../detect/index.ts";
-import { executableCandidates, expandDirGlob, findNodeBin, stripJsonComments } from "../fs-utils.ts";
+import { clearWhichCache, executableCandidates, expandDirGlob, findNodeBin, stripJsonComments } from "../fs-utils.ts";
 import { effectiveChecks, renderPromptSection, tierAllowed } from "../profile/render.ts";
 import { emptyUserData, isStale, loadOrDetect, updateUser } from "../profile/store.ts";
 import { DEFAULT_CONFIG, type Check, type StoredProfile } from "../types.ts";
@@ -771,6 +771,53 @@ test("doctor: runtime mismatch, missing dependencies and unavailable checks come
   assert.ok(report.includes("✗ node_modules missing — run `npm ci`"));
   assert.ok(report.includes("✗ typecheck"));
   assert.ok(/## Fix[\s\S]*`npm ci`/.test(report));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("machine independence: a shellcheck on PATH neither appears without shell files nor hides the project's CI/Makefile lint", () => {
+  const bin = tmp();
+  const fake = join(bin, IS_WIN ? "shellcheck.cmd" : "shellcheck");
+  writeFileSync(fake, IS_WIN ? "@exit /b 0\r\n" : "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const prevPath = process.env.PATH;
+  process.env.PATH = `${bin}${IS_WIN ? ";" : ":"}${prevPath}`;
+  clearWhichCache();
+  try {
+    const root = tmp();
+    write(root, "Makefile", "lint:\n\tcargo clippy\n");
+    write(root, ".gitlab-ci.yml", "lint:\n  script:\n    - cargo clippy -- -D warnings\n");
+    write(root, "Cargo.toml", "[package]\nname = \"x\"\n");
+    let p = detectProject(root, config);
+    assert.ok(!p.checks.some((c) => c.id === "sh:shellcheck"), "no shell files → no shellcheck check");
+    assert.ok(p.checks.some((c) => c.source === "CI workflow" && c.cmd === "cargo clippy -- -D warnings"));
+    write(root, "scripts/release.sh", "#!/bin/sh\necho hi\n");
+    p = detectProject(root, config);
+    const sc = p.checks.find((c) => c.id === "sh:shellcheck");
+    assert.ok(sc?.incidental, "shellcheck is present for shell files, marked incidental");
+    assert.ok(p.checks.some((c) => c.source === "CI workflow" && c.cmd === "cargo clippy -- -D warnings"), "an incidental shell linter does not count as the project's lint");
+    const mk = tmp();
+    write(mk, "Makefile", "lint:\n\t./lint.sh\n");
+    write(mk, "lint.sh", "#!/bin/sh\n");
+    assert.ok(detectProject(mk, config).checks.some((c) => c.id === "Makefile:lint"));
+    rmSync(root, { recursive: true, force: true });
+    rmSync(mk, { recursive: true, force: true });
+  } finally {
+    process.env.PATH = prevPath;
+    clearWhichCache();
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
+test("availability is judged on what actually runs: a scoped run does not need the package manager of the full command", async () => {
+  const root = tmp();
+  mkdirSync(join(root, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(root, "node_modules", ".bin", "vitest"), '#!/bin/sh\necho "FAIL argv: $*"\nexit 1\n', { mode: 0o755 });
+  writeFileSync(join(root, "node_modules", ".bin", "vitest.cmd"), "@echo FAIL argv: %*\r\n@exit /b 1\r\n", { mode: 0o755 });
+  const check: Check = { id: "node:test", tier: "test", label: "test", cmd: "nopm run test", argv: ["definitely-not-a-package-manager-xyz", "run", "test"], cwd: root, source: "t", requires: { files: ["node_modules"] }, tool: "vitest", scope: scopeFromScript("vitest run", binHead, display) };
+  const hooks = { permission: async () => "allow" as const, broken: new Map<string, string>() };
+  const scopedRun = await runCheck({ check, files: ["src/a.ts"] }, config, hooks);
+  assert.equal(scopedRun.status, "fail");
+  const fullRun = await runCheck({ check, files: [] }, config, hooks);
+  assert.equal(fullRun.status, "env");
   rmSync(root, { recursive: true, force: true });
 });
 

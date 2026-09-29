@@ -103,7 +103,7 @@ function applyTargets(b: Builder, targets: string[], display: (t: string) => str
   for (const t of targets) {
     for (const [re, tier, label] of CHECK_TARGETS) {
       if (!re.test(t)) continue;
-      if (b.checks.some((c) => c.tier === tier && c.label === label)) continue;
+      if (b.hasCheckFor(tier, label)) continue;
       if (b.checks.some((c) => c.id === `${source}:${t}`)) continue;
       b.check({ id: `${source}:${t}`, tier, label, cmd: display(t), argv: argv(t), source: `${source} target ${t}`, requires, tool: "generic" });
     }

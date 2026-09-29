@@ -11,7 +11,7 @@ import { detectCI, detectConventions, detectInstructions, detectRepoShape, detec
 import { detectRust } from "./rust.ts";
 
 /** Bump when detector output changes shape/semantics so caches refresh. */
-export const DETECTOR_VERSION = 11;
+export const DETECTOR_VERSION = 12;
 
 const LANG_EXTS: Record<string, string[]> = { TypeScript: [".ts", ".tsx", ".mts", ".cts"], JavaScript: [".js", ".jsx", ".mjs", ".cjs"], Python: [".py"], Rust: [".rs"], Go: [".go"], Ruby: [".rb"], Java: [".java"], Kotlin: [".kt", ".kts"], Scala: [".scala"], Swift: [".swift"], PHP: [".php"], Elixir: [".ex", ".exs"], Dart: [".dart"], C: [".c", ".h"], "C++": [".cc", ".cpp", ".cxx", ".hpp"], Zig: [".zig"], Haskell: [".hs"], OCaml: [".ml", ".mli"], "C#": [".cs"], "F#": [".fs"], Lua: [".lua"], Perl: [".pl", ".pm"], Erlang: [".erl"], Gleam: [".gleam"], Nim: [".nim"], Julia: [".jl"], R: [".r"], "HCL (Terraform)": [".tf"], Shell: [".sh", ".bash"], Markdown: [".md"] };
 
@@ -140,6 +140,7 @@ export function detectProject(root: string, config: ProfileConfig, gitRoot?: str
   };
   const b = new Builder(root, { ignoreDirs: config.ignoreDirs, timeouts });
   const shape = detectRepoShape(b, gitRoot);
+  b.extCounts = shape.extCounts;
   // Detectors run in order of how much of the repo their language covers, so the
   // primary ecosystem claims the shared command keys (test, build, …) first.
   const detectors: Array<[(b: Builder) => void, string[]]> = [
@@ -217,7 +218,7 @@ export function detectProject(root: string, config: ProfileConfig, gitRoot?: str
 
 /** Turn read-only commands found in CI into lint/fast checks (they encode what the project enforces). */
 function addCiChecks(b: Builder, runs: string[]): void {
-  const covered = (tier: Tier, label: string) => b.checks.some((c) => c.tier === tier && c.label === label);
+  const covered = (tier: Tier, label: string) => b.hasCheckFor(tier, label);
   for (const cmd of runs) {
     if (!ciCommandFitsRoot(b, cmd)) continue;
     let tier: Tier | undefined;
