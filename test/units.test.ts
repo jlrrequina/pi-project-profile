@@ -567,7 +567,7 @@ test("diff guard: suppressions, focus/skip, stubs, loosened configs, removed/del
     put("src/stub.py", "", "def f():\n    raise NotImplementedError\n"),
     put("tests/old.test.ts", "it('x', () => {});\n", null),
     put("tsconfig.json", '{ "compilerOptions": { "strict": true } }\n', '{ "compilerOptions": {\n "strict": false\n } }\n'),
-    put("src/keys.ts", "", "export const k = 'AKIA" + "Q3EGUNSAFEKEY2P7';\nexport const demo = 'AKIAIOSFODNN7EXAMPLE';\n"),
+    put("src/keys.ts", "", "export const k = 'AKIA" + "Q3EGUNSAFEKEY2P7';\nexport const demo = 'AKIAIOSFODNN7" + "EXAMPLE';\n"),
     put(".env", null, "TOKEN=abc\n"),
     put(".env.example", null, "TOKEN=\n"),
     put("package.json", '{"name":"x","dependencies":{"a":"1"}}', '{"name":"x","dependencies":{"a":"1","b":"2"}}'),
