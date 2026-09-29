@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+- **Bundled Agent Skill** `project-profile` (`/skill:project-profile`): an operating and troubleshooting guide the model loads on demand — how to read the `<project_profile>` section, what each `[verification]` message means and what to do, the `run_checks` tool, every `/profile` and `/verify` command, a symptom → fix table and all configuration keys. Declared in the `pi` manifest and listed in the π package catalog as a skill.
+- `llms.txt` (llmstxt.org format) at the package root and on the site, linking the README, skill, changelog, contributor and security documents for language models and agents.
+- Landing site at <https://jlrrequina.github.io/pi-project-profile/> (static; Open Graph and Twitter cards, `SoftwareApplication`/`SoftwareSourceCode`/`FAQPage` structured data, `sitemap.xml`), published by a pinned Pages workflow.
+- README: tagline, downloads and catalog badges, *Why* and *How it works*, the full list of instruction files detected, an FAQ (Claude Code/Cursor/Codex/Copilot compatibility, repository safety, tests, prompt caching, overriding a detection, headless runs) and links.
+- Fixed: the npm description was 503 characters and the registry stores 255, so npm search, the package page and the π catalog cut it mid-sentence ("…verifies the agent's changes after"). It is now 248 characters and front-loaded. Keywords reworked (`agents-md`, `claude-md`, `cursorrules`, `copilot-instructions`, `guardrails`, `context-engineering`, …).
+- Tests guard the discoverability metadata: description length, catalog keyword and manifest entries, skill frontmatter (name = directory, limits, documented commands and config keys exist), `llms.txt` structure and link targets, site ↔ sitemap ↔ workflow agreement; the tarball smoke test requires the skill and `llms.txt`.
+
 ## 1.0.1 — 2026-09-29
 
 - Fixed: paths from tool calls are resolved through symlinks, so files in a symlinked checkout are grouped with their project, shown relative to it and attributed correctly by the review of changes.

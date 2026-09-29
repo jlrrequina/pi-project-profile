@@ -1,20 +1,36 @@
 # pi-project-profile
 
-[![npm](https://img.shields.io/npm/v/@lenard9191/pi-project-profile)](https://www.npmjs.com/package/@lenard9191/pi-project-profile)
-[![CI](https://github.com/jlrrequina/pi-project-profile/actions/workflows/ci.yml/badge.svg)](https://github.com/jlrrequina/pi-project-profile/actions/workflows/ci.yml)
-[![license](https://img.shields.io/npm/l/@lenard9191/pi-project-profile)](LICENSE)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jlrrequina/pi-project-profile/badge)](https://scorecard.dev/viewer/?uri=github.com/jlrrequina/pi-project-profile)
+**Project-aware π (pi) coding agent, with a verification gate.** A [π](https://pi.dev) extension that detects any repository's stack, commands, conventions and instruction files (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`, …), injects them as a stable `<project_profile>` system-prompt section, and then runs the project's *own* typecheck, lint, tests and build after every agent turn — with a bounded self-repair loop and a review of the agent's diff.
 
-Makes the [π coding agent](https://pi.dev) project-aware in any repository, then checks its work.
+[![npm version](https://img.shields.io/npm/v/@lenard9191/pi-project-profile)](https://www.npmjs.com/package/@lenard9191/pi-project-profile)
+[![npm downloads](https://img.shields.io/npm/dm/@lenard9191/pi-project-profile)](https://www.npmjs.com/package/@lenard9191/pi-project-profile)
+[![π package](https://img.shields.io/badge/pi.dev-package-8A2BE2)](https://pi.dev/packages/@lenard9191/pi-project-profile)
+[![CI](https://github.com/jlrrequina/pi-project-profile/actions/workflows/ci.yml/badge.svg)](https://github.com/jlrrequina/pi-project-profile/actions/workflows/ci.yml)
+[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/jlrrequina/pi-project-profile/badge)](https://scorecard.dev/viewer/?uri=github.com/jlrrequina/pi-project-profile)
+[![license](https://img.shields.io/npm/l/@lenard9191/pi-project-profile)](LICENSE)
+
+```bash
+pi install npm:@lenard9191/pi-project-profile
+```
 
 ![pi-project-profile: the injected project profile and the verification of an agent turn](https://raw.githubusercontent.com/jlrrequina/pi-project-profile/main/docs/cover.png)
 
-- **Profile**: detects the stack, commands (including how to run one test), conventions, CI checks, test layout, generated code and instruction files (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`, …), and injects them as a stable `<project_profile>` system-prompt section.
+- **Profile**: detects the stack, commands (including how to run one test), conventions, CI checks, test layout, generated code and instruction files (`AGENTS.md`, `CLAUDE.md`, `.cursorrules`, Copilot, Windsurf, Cline, Gemini, Codex, …), and injects them as a stable `<project_profile>` system-prompt section.
 - **Verify**: after every turn that changed files, runs the project's *own* checks and sends new failures back to the agent for a bounded number of repair rounds.
 - **Review**: flags what a reviewer would want to know about the agent's diff: added suppressions, skipped or focused tests, stubs, loosened configs, deleted tests, secrets, unignored `.env` files, stale lockfiles.
 - **Rules on demand**: delivers nested `AGENTS.md` files and glob-scoped rules (Cursor, Copilot, Windsurf) when the agent first touches a file they apply to, and warns before hand-editing generated files.
 
 It never writes into the repository. Cache and settings live under `~/.pi/agent/project-profile/`.
+
+## Why
+
+A coding agent dropped into an unfamiliar repository guesses: which package manager, which test runner, whether `tsc` or `biome` is the source of truth, where tests live, which files are generated. Then it reports "done" without having run anything, or runs the wrong thing. pi-project-profile answers those questions once per repository, keeps the answer stable so prompt caching works, and turns "done" into "the project's own checks pass" — without ever running installs, migrations or deploys on its own.
+
+## How it works
+
+1. **Session start** — the repository is scanned (manifests, lockfiles, CI files, Makefiles, instruction files; nothing is executed), cached under `~/.pi/agent/project-profile/`, and rendered as `<project_profile>` in the system prompt. Re-detection happens automatically when a manifest changes.
+2. **Each turn** — files the agent touches are tracked; nested `AGENTS.md`/`CLAUDE.md` and glob-scoped rules that apply to them are delivered with the first matching tool result; generated files get a warning.
+3. **Before the turn settles** — if files changed, the syntax, typecheck and lint tiers run (tests and builds once you have allowed them for the repo). New failures go back to the agent as a `[verification]` message for at most three repair rounds; pre-existing failures are reported to you once and never blamed on the agent. The diff review runs alongside.
 
 ## Install
 
@@ -22,7 +38,9 @@ It never writes into the repository. Cache and settings live under `~/.pi/agent/
 pi install npm:@lenard9191/pi-project-profile
 ```
 
-Requires π ≥ 0.87 and Node ≥ 22.18. No runtime dependencies. Update with `pi update npm:@lenard9191/pi-project-profile`.
+Requires π ≥ 0.87 and Node ≥ 22.18. No runtime dependencies. Update with `pi update npm:@lenard9191/pi-project-profile`. Try it once without installing: `pi -e npm:@lenard9191/pi-project-profile`.
+
+The package ships one extension and one [Agent Skill](https://agentskills.io) (`skills/project-profile`): an operating and troubleshooting guide the model loads on demand when a verification message needs interpreting or you ask how to configure the extension. `/skill:project-profile` loads it explicitly.
 
 ## What the agent sees
 
@@ -109,6 +127,53 @@ Secrets, stale lockfiles and `.only` get one follow-up turn; weakening added whi
 ## Coverage
 
 Node/TypeScript (npm, pnpm, yarn, bun; workspaces, Turborepo, Nx), Deno, Rust, Go, Python (uv, poetry, pdm, pipenv, hatch), Ruby, JVM (Gradle, Maven, Kotlin, Android), .NET, Swift, PHP, Elixir, Dart/Flutter, C/C++ (CMake, Meson), Zig, Haskell, Scala, OCaml, Gleam, Erlang, Terraform, shell, Lua, Perl, plus Makefile/justfile/Taskfile targets, Bazel, CI (GitHub Actions, GitLab, CircleCI, Azure, Travis, Jenkins, Buildkite, Bitbucket), docker-compose services and umbrella repos. Tested on macOS, Linux and Windows.
+
+Instruction files: `AGENTS.md`, `AGENTS.override.md`, `CLAUDE.md` (root and nested), `.cursorrules`, `.cursor/rules/*.mdc`, `.github/copilot-instructions.md`, `.github/instructions/*.instructions.md`, `.windsurfrules`, `.windsurf/rules`, `.clinerules`, `.roo/rules`, `.agents/rules`, `GEMINI.md`, `CONVENTIONS.md`, `.junie/guidelines.md`, `.codex/instructions.md`, `codex.md`, `.continuerules`, `.aider.conf.yml`.
+
+## FAQ
+
+### Does it work with Claude Code, Cursor, Codex or GitHub Copilot?
+
+It is an extension for the π coding agent only. It does read the instruction files those tools use (`CLAUDE.md`, `.cursorrules`, `.cursor/rules`, `copilot-instructions.md`, `.github/instructions`, Windsurf and Cline rules, `GEMINI.md`, `codex.md`), so a repository already set up for them is understood by π with no extra configuration.
+
+### Does it change anything in my repository?
+
+No. Detection is read-only, the cache and per-repo settings live under `~/.pi/agent/project-profile/`, logs under `$TMPDIR/pi-project-profile/`. The automatic checks are the project's own read-only commands; auto-fix commands are suggested, never run.
+
+### Will it run my tests or builds automatically?
+
+Only after you allow it once per repository (`/profile tests allow`, or answer the prompt the first time). Typecheck and lint run automatically because they are read-only. Installs, migrations, deploys and anything that needs the network are never run.
+
+### What happens when a check fails?
+
+The failing diagnostics (pruned to ~40 lines, with the full log path and an auto-fix hint) go back to the agent, which must fix the cause — not disable the check — and end its turn; the checks re-run. After three rounds, or when a round changes nothing or repeats the same failure, the loop stops and the agent summarizes what is still failing instead of claiming success.
+
+### My repo was already failing before the agent touched it. Will the agent try to fix that?
+
+No. Diagnostics recorded before the prompt are pre-existing: hidden from the agent, reported to you once, and they don't block the test tier. `/verify` still shows everything.
+
+### Does it break prompt caching?
+
+No. The `<project_profile>` section contains no timestamps, branch names or iteration-order-dependent content, so it is byte-identical for every turn of a session.
+
+### The detected command is wrong. How do I fix it?
+
+`/profile set test "pnpm vitest run"` overrides one key for this repository (`/profile set lint -` disables one); `/profile doctor` explains missing tools; `/profile refresh` re-detects. Persist guidance for the agent with `/profile note "…"`. For a wrong detection worth reporting, include the output of `node scripts/scan.ts <repo> --checks` in the [issue](https://github.com/jlrrequina/pi-project-profile/issues).
+
+### How is this different from an LSP or linter extension?
+
+An LSP-based extension gives the model diagnostics as it edits. pi-project-profile runs the project's *own* commands — the ones CI runs — as a gate after the turn, with a repair loop, a pre-existing-failure baseline and a diff review; it also supplies the profile in the first place. The two are complementary.
+
+### Does it work in headless or scripted π runs?
+
+Yes: `verify.headless` (default `true`) runs the gate in print/JSON/RPC modes too, and test/build tiers that would need a confirmation are skipped instead of blocking.
+
+## Links
+
+- npm: <https://www.npmjs.com/package/@lenard9191/pi-project-profile>
+- π package catalog: <https://pi.dev/packages/@lenard9191/pi-project-profile>
+- Site: <https://jlrrequina.github.io/pi-project-profile/> · [`llms.txt`](llms.txt) for language models
+- [Changelog](CHANGELOG.md) · [Security policy](SECURITY.md) · [Contributing](CONTRIBUTING.md) · [Constraints for changes](AGENTS.md)
 
 ## Development
 

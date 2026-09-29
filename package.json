@@ -1,7 +1,7 @@
 {
   "name": "@lenard9191/pi-project-profile",
   "version": "1.0.1",
-  "description": "Pi coding-agent extension that auto-detects any repository's stack, commands, conventions, CI checks and AGENTS.md/CLAUDE.md-style instruction files, injects a stable <project_profile> section into the system prompt, and verifies the agent's changes after every turn by running the project's own typecheck/lint (and, once confirmed, tests/build) with a bounded self-repair loop. Works for Node/TypeScript, Rust, Go, Python, Ruby, JVM, .NET, Swift, PHP, Elixir, Dart and more. Never writes into the repo.",
+  "description": "Pi (π) coding-agent extension: project-aware system prompt for any repo (stack, commands, conventions, AGENTS.md/CLAUDE.md rules) plus a gate that runs the project's own typecheck/lint/tests after every agent turn, with self-repair and diff review.",
   "type": "module",
   "license": "MIT",
   "author": {
@@ -12,27 +12,38 @@
     "pi",
     "pi-extension",
     "pi-coding-agent",
+    "pi-skill",
     "coding-agent",
     "ai-agent",
-    "agent-tools",
+    "ai-coding-assistant",
+    "agent-harness",
+    "agent-skills",
+    "llm",
     "project-profile",
     "project-detection",
     "repository-context",
+    "codebase-context",
+    "context-engineering",
     "system-prompt",
     "verification",
     "quality-gate",
+    "guardrails",
     "self-repair",
+    "feedback-loop",
     "typecheck",
     "lint",
     "test-runner",
-    "monorepo",
-    "AGENTS.md",
-    "developer-tools",
     "code-review",
-    "secrets",
-    "cursor-rules"
+    "diff-review",
+    "secret-detection",
+    "agents-md",
+    "claude-md",
+    "cursorrules",
+    "copilot-instructions",
+    "monorepo",
+    "developer-tools"
   ],
-  "homepage": "https://github.com/jlrrequina/pi-project-profile#readme",
+  "homepage": "https://jlrrequina.github.io/pi-project-profile/",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/jlrrequina/pi-project-profile.git"
@@ -49,6 +60,8 @@
     "profile/",
     "verify/",
     "scripts/scan.ts",
+    "skills/",
+    "llms.txt",
     "README.md",
     "CHANGELOG.md",
     "LICENSE"
@@ -62,6 +75,9 @@
   "pi": {
     "extensions": [
       "./index.ts"
+    ],
+    "skills": [
+      "./skills"
     ],
     "image": "https://raw.githubusercontent.com/jlrrequina/pi-project-profile/main/docs/cover.png"
   },

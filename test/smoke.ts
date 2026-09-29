@@ -33,7 +33,7 @@ const walk = (d: string, rel = "") => {
 };
 walk(dir);
 const banned = packed.filter((f) => /^(test|docs|\.github|node_modules)\/|^scripts\/(?!scan\.ts$)|^(tsconfig\.json|AGENTS\.md|CONTRIBUTING\.md|SECURITY\.md)$/.test(f));
-const missing = ["index.ts", "package.json", "README.md", "LICENSE", "CHANGELOG.md", "scripts/scan.ts"].filter((f) => !packed.includes(f));
+const missing = ["index.ts", "package.json", "README.md", "LICENSE", "CHANGELOG.md", "scripts/scan.ts", "skills/project-profile/SKILL.md", "llms.txt"].filter((f) => !packed.includes(f));
 if (banned.length || missing.length) fail(`packed files — unexpected: ${JSON.stringify(banned)}, missing: ${JSON.stringify(missing)}`);
 
 const mod = await import(pathToFileURL(join(dir, "index.ts")).href);

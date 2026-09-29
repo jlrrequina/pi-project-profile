@@ -2,4 +2,13 @@ blank_issues_enabled: false
 contact_links:
   - name: Documentation
     url: https://github.com/jlrrequina/pi-project-profile#readme
-    about: Commands, configuration and what gets run.
+    about: Commands, configuration, what gets run, and the FAQ.
+  - name: Operating and troubleshooting guide (the bundled skill)
+    url: https://github.com/jlrrequina/pi-project-profile/blob/main/skills/project-profile/SKILL.md
+    about: What each verification message means, symptom → fix table, every /profile and /verify command.
+  - name: Package page in the π catalog
+    url: https://pi.dev/packages/@lenard9191/pi-project-profile
+    about: Install command and release history on pi.dev.
+  - name: Report a security vulnerability
+    url: https://github.com/jlrrequina/pi-project-profile/security/advisories/new
+    about: Private report; please do not open a public issue for security problems.

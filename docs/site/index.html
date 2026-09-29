@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi-project-profile: project-aware π coding agent + verification gate</title>
+<meta name="description" content="π (pi) coding-agent extension: detects any repo's stack, commands and AGENTS.md/CLAUDE.md rules, then runs the project's own typecheck, lint and tests after every turn.">
+<link rel="canonical" href="https://jlrrequina.github.io/pi-project-profile/">
+<link rel="alternate" type="text/plain" href="https://jlrrequina.github.io/pi-project-profile/llms.txt" title="llms.txt">
+<link rel="sitemap" type="application/xml" href="https://jlrrequina.github.io/pi-project-profile/sitemap.xml">
+<meta name="robots" content="index, follow, max-image-preview:large">
+<meta name="theme-color" content="#0b0e14">
+<meta name="author" content="John Lenard Requina">
+<meta name="keywords" content="pi coding agent, π, pi extension, pi package, AGENTS.md, CLAUDE.md, cursorrules, coding agent verification, quality gate, typecheck, lint, tests, self-repair, project detection, system prompt, prompt caching, monorepo">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="pi-project-profile">
+<meta property="og:title" content="pi-project-profile — project-aware π coding agent with a verification gate">
+<meta property="og:description" content="Detects any repo's stack, commands, conventions and AGENTS.md/CLAUDE.md rules for the π coding agent, then runs the project's own typecheck, lint and tests after every turn with self-repair and diff review. Never writes into the repo.">
+<meta property="og:url" content="https://jlrrequina.github.io/pi-project-profile/">
+<meta property="og:image" content="https://jlrrequina.github.io/pi-project-profile/cover.png">
+<meta property="og:image:width" content="2560">
+<meta property="og:image:height" content="1280">
+<meta property="og:image:alt" content="The injected project profile and the verification of an agent turn">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="pi-project-profile — project-aware π coding agent with a verification gate">
+<meta name="twitter:description" content="Detects any repo's stack, commands, conventions and AGENTS.md/CLAUDE.md rules for the π coding agent, then verifies every turn with the project's own checks.">
+<meta name="twitter:image" content="https://jlrrequina.github.io/pi-project-profile/cover.png">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@graph": [
+    {
+      "@type": "SoftwareApplication",
+      "@id": "https://jlrrequina.github.io/pi-project-profile/#software",
+      "name": "pi-project-profile",
+      "alternateName": "@lenard9191/pi-project-profile",
+      "description": "Extension for the π (pi) coding agent that detects any repository's stack, commands, conventions and instruction files (AGENTS.md, CLAUDE.md, .cursorrules), injects them as a stable <project_profile> system-prompt section, and verifies every agent turn by running the project's own typecheck, lint, tests and build with a bounded self-repair loop and a review of the agent's diff. It never writes into the repository.",
+      "url": "https://jlrrequina.github.io/pi-project-profile/",
+      "applicationCategory": "DeveloperApplication",
+      "applicationSubCategory": "Coding agent extension",
+      "operatingSystem": "macOS, Linux, Windows",
+      "softwareRequirements": "π coding agent >= 0.87, Node.js >= 22.18",
+      "downloadUrl": "https://www.npmjs.com/package/@lenard9191/pi-project-profile",
+      "installUrl": "https://pi.dev/packages/@lenard9191/pi-project-profile",
+      "license": "https://opensource.org/license/mit",
+      "isAccessibleForFree": true,
+      "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+      "image": "https://jlrrequina.github.io/pi-project-profile/cover.png",
+      "screenshot": "https://jlrrequina.github.io/pi-project-profile/cover.png",
+      "author": { "@type": "Person", "name": "John Lenard Requina", "url": "https://github.com/jlrrequina" },
+      "keywords": "pi coding agent, pi extension, AGENTS.md, CLAUDE.md, verification gate, typecheck, lint, tests, self-repair, project detection, system prompt",
+      "sameAs": [
+        "https://github.com/jlrrequina/pi-project-profile",
+        "https://www.npmjs.com/package/@lenard9191/pi-project-profile",
+        "https://pi.dev/packages/@lenard9191/pi-project-profile"
+      ]
+    },
+    {
+      "@type": "SoftwareSourceCode",
+      "@id": "https://jlrrequina.github.io/pi-project-profile/#source",
+      "name": "pi-project-profile",
+      "codeRepository": "https://github.com/jlrrequina/pi-project-profile",
+      "programmingLanguage": "TypeScript",
+      "runtimePlatform": "Node.js",
+      "license": "https://opensource.org/license/mit",
+      "targetProduct": { "@id": "https://jlrrequina.github.io/pi-project-profile/#software" }
+    },
+    {
+      "@type": "FAQPage",
+      "@id": "https://jlrrequina.github.io/pi-project-profile/#faq",
+      "mainEntity": [
+        {
+          "@type": "Question",
+          "name": "Does it work with Claude Code, Cursor, Codex or GitHub Copilot?",
+          "acceptedAnswer": { "@type": "Answer", "text": "It is an extension for the π coding agent only. It does read the instruction files those tools use (CLAUDE.md, .cursorrules, .cursor/rules, copilot-instructions.md, .github/instructions, Windsurf and Cline rules, GEMINI.md, codex.md), so a repository already set up for them is understood by π with no extra configuration." }
+        },
+        {
+          "@type": "Question",
+          "name": "Does it change anything in my repository?",
+          "acceptedAnswer": { "@type": "Answer", "text": "No. Detection is read-only; the cache and per-repo settings live under ~/.pi/agent/project-profile/ and logs under $TMPDIR/pi-project-profile/. The automatic checks are the project's own read-only commands; auto-fix commands are suggested, never run." }
+        },
+        {
+          "@type": "Question",
+          "name": "Will it run my tests or builds automatically?",
+          "acceptedAnswer": { "@type": "Answer", "text": "Only after you allow it once per repository. Typecheck and lint run automatically because they are read-only. Installs, migrations, deploys and anything that needs the network are never run." }
+        },
+        {
+          "@type": "Question",
+          "name": "What happens when a check fails?",
+          "acceptedAnswer": { "@type": "Answer", "text": "The failing diagnostics go back to the agent, which must fix the cause — not disable the check — and end its turn; the checks re-run. After three rounds, or when a round changes nothing or repeats the same failure, the loop stops and the agent summarizes what is still failing instead of claiming success." }
+        },
+        {
+          "@type": "Question",
+          "name": "Does it break prompt caching?",
+          "acceptedAnswer": { "@type": "Answer", "text": "No. The project_profile section contains no timestamps, branch names or iteration-order-dependent content, so it is byte-identical for every turn of a session." }
+        },
+        {
+          "@type": "Question",
+          "name": "The detected command is wrong. How do I fix it?",
+          "acceptedAnswer": { "@type": "Answer", "text": "/profile set <key> <command> overrides one key for the repository (use - to disable it); /profile doctor explains missing tools; /profile refresh re-detects; /profile note persists guidance for the agent." }
+        }
+      ]
+    }
+  ]
+}
+</script>
+
+<style>
+  :root { color-scheme: light dark; --bg: #ffffff; --fg: #1f2328; --muted: #59636e; --line: #d1d9e0; --code: #f6f8fa; --accent: #1f883d; --link: #0969da; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #0b0e14; --fg: #e6edf3; --muted: #8b949e; --line: #30363d; --code: #161b22; --accent: #7ee787; --link: #79c0ff; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.6 -apple-system, "Segoe UI", Helvetica, Arial, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 48px 20px 64px; }
+  h1 { font-size: 2.1rem; line-height: 1.2; margin: 0 0 .5rem; letter-spacing: -.02em; }
+  h1 .pi { color: var(--accent); }
+  h2 { font-size: 1.35rem; margin: 2.4rem 0 .8rem; padding-top: .4rem; border-top: 1px solid var(--line); }
+  h3 { font-size: 1.05rem; margin: 1.4rem 0 .4rem; }
+  p.lead { font-size: 1.15rem; color: var(--muted); margin: 0 0 1.2rem; }
+  a { color: var(--link); }
+  code, pre { font-family: "SF Mono", Menlo, Consolas, "Liberation Mono", monospace; font-size: .92em; }
+  code { background: var(--code); padding: .1em .35em; border-radius: 4px; }
+  pre { background: var(--code); border: 1px solid var(--line); border-radius: 8px; padding: 14px 16px; overflow-x: auto; line-height: 1.5; }
+  pre code { background: none; padding: 0; }
+  .install { font-size: 1.05rem; margin: 1rem 0 1.4rem; }
+  .links { display: flex; flex-wrap: wrap; gap: .5rem 1.2rem; margin: 0 0 1.6rem; padding: 0; list-style: none; color: var(--muted); }
+  img.cover { width: 100%; height: auto; border: 1px solid var(--line); border-radius: 10px; margin: .4rem 0 1.2rem; }
+  table { border-collapse: collapse; width: 100%; font-size: .95rem; }
+  th, td { text-align: left; padding: .45rem .6rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--muted); font-weight: 600; }
+  ul { padding-left: 1.3rem; }
+  li { margin: .25rem 0; }
+  footer { margin-top: 3rem; padding-top: 1rem; border-top: 1px solid var(--line); color: var(--muted); font-size: .92rem; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1><span class="pi">π</span> pi-project-profile</h1>
+    <p class="lead">Project-aware <a href="https://pi.dev">π (pi) coding agent</a> with a verification gate. Detects any repository's stack, commands, conventions and instruction files (<code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>.cursorrules</code>, …), injects them as a stable <code>&lt;project_profile&gt;</code> system-prompt section, then runs the project's <em>own</em> typecheck, lint, tests and build after every agent turn — with a bounded self-repair loop and a review of the agent's diff. It never writes into the repository.</p>
+    <pre class="install"><code>pi install npm:@lenard9191/pi-project-profile</code></pre>
+    <ul class="links">
+      <li><a href="https://github.com/jlrrequina/pi-project-profile">GitHub</a></li>
+      <li><a href="https://www.npmjs.com/package/@lenard9191/pi-project-profile">npm</a></li>
+      <li><a href="https://pi.dev/packages/@lenard9191/pi-project-profile">π package catalog</a></li>
+      <li><a href="https://github.com/jlrrequina/pi-project-profile/blob/main/CHANGELOG.md">Changelog</a></li>
+      <li><a href="llms.txt">llms.txt</a></li>
+    </ul>
+    <img class="cover" src="cover.png" width="2560" height="1280" alt="Terminal screenshot: the injected project profile on the left, and the verification of an agent turn — typecheck and lint results and a repair round — on the right" loading="eager" fetchpriority="high">
+  </header>
+
+  <section id="what">
+    <h2>What it does</h2>
+    <ul>
+      <li><strong>Profile</strong> — detects the stack, commands (including how to run one test), conventions, CI checks, test layout, generated code and instruction files (<code>AGENTS.md</code>, <code>CLAUDE.md</code>, <code>.cursorrules</code>, Copilot, Windsurf, Cline, Gemini, Codex, …), and injects them as a stable <code>&lt;project_profile&gt;</code> section that keeps prompt caching intact.</li>
+      <li><strong>Verify</strong> — after every turn that changed files, runs the project's own checks by tier (syntax → typecheck → lint automatically; tests and build once you allow them per repository) and sends only <em>new</em> failures back to the agent for at most three repair rounds.</li>
+      <li><strong>Review</strong> — flags what a reviewer would want to know about the agent's diff: added suppressions, skipped or focused tests, stubs, loosened configs, deleted tests, secrets, unignored <code>.env</code> files, stale lockfiles.</li>
+      <li><strong>Rules on demand</strong> — delivers nested <code>AGENTS.md</code> files and glob-scoped rules (Cursor, Copilot, Windsurf) when the agent first touches a file they apply to, and warns before hand-editing generated files.</li>
+    </ul>
+    <p>Installs, migrations, deploys and anything network-bound are never run. Cache and settings live under <code>~/.pi/agent/project-profile/</code>. Requires π ≥ 0.87 and Node ≥ 22.18; no runtime dependencies; MIT.</p>
+  </section>
+
+  <section id="example">
+    <h2>What the agent sees</h2>
+<pre><code>&lt;project_profile&gt;
+- Project: zod — ~/projects/zod · remote github.com/colinhacks/zod · ~741 tracked files
+- Stack: monorepo: pnpm workspaces (8 packages) · pnpm · Vite · Vitest
+- Commands: install `pnpm install` · typecheck `pnpm exec tsc --noEmit -p tsconfig.json` · lint `pnpm run lint` · test `pnpm run test` · test one `pnpm exec vitest run &lt;file&gt; -t "&lt;name&gt;"`
+- Conventions: ESM · Prettier · Biome · Husky git hooks · License: MIT
+- Tests: `*.test.ts` in tests/ (202)
+- Instruction files: AGENTS.md (loaded) · .cursorrules (22 KB — read it when relevant)
+- Verification: after each turn that changed files, the harness runs `pnpm exec tsc --noEmit -p tsconfig.json`, `pnpm run lint:check` automatically; asks once before running tests
+&lt;/project_profile&gt;</code></pre>
+  </section>
+
+  <section id="tiers">
+    <h2>Verification tiers</h2>
+    <table>
+      <thead><tr><th>Tier</th><th>Examples</th><th>Policy</th></tr></thead>
+      <tbody>
+        <tr><td>syntax</td><td><code>node --check</code>, <code>python -c ast.parse</code>, <code>ruby -c</code>, <code>bash -n</code>, JSON parse</td><td>automatic, changed files only</td></tr>
+        <tr><td>fast</td><td><code>tsc --noEmit</code>, <code>cargo check</code>, <code>go build</code>/<code>go vet</code>, <code>mypy</code>/<code>pyright</code>, <code>mix compile</code>, <code>dart analyze</code></td><td>automatic</td></tr>
+        <tr><td>lint</td><td><code>eslint</code>, <code>biome</code>, <code>prettier --check</code>, <code>ruff</code>, <code>cargo fmt --check</code>/<code>clippy</code>, <code>gofmt</code>, <code>rubocop</code>, <code>swiftlint</code></td><td>automatic</td></tr>
+        <tr><td>test</td><td><code>npm test</code>, <code>cargo test</code>, <code>pytest</code>, <code>go test</code>, <code>rspec</code>, <code>mix test</code>, <code>phpunit</code>, <code>swift test</code>, <code>./gradlew test</code></td><td>confirmed once per repo</td></tr>
+        <tr><td>build</td><td><code>pnpm build</code>, <code>./gradlew compile*</code>, <code>swift build</code>, <code>zig build</code>, <code>cmake --build</code></td><td>confirmed once per repo</td></tr>
+      </tbody>
+    </table>
+    <p>Pre-existing failures (a repository that was already red) are hidden from the agent and reported to you once. Tests are narrowed to the changed files when that is safe (<code>vitest related</code>, <code>jest --findRelatedTests</code>, <code>go test ./&lt;pkg&gt;/...</code>, <code>cargo test -p</code>, <code>pytest &lt;files&gt;</code>); monorepo packages are checked in their own directory. Format and lint failures come with the exact auto-fix command.</p>
+  </section>
+
+  <section id="coverage">
+    <h2>Coverage</h2>
+    <p>Node/TypeScript (npm, pnpm, yarn, bun; workspaces, Turborepo, Nx), Deno, Rust, Go, Python (uv, poetry, pdm, pipenv, hatch), Ruby, JVM (Gradle, Maven, Kotlin, Android), .NET, Swift, PHP, Elixir, Dart/Flutter, C/C++ (CMake, Meson), Zig, Haskell, Scala, OCaml, Gleam, Erlang, Terraform, shell, Lua, Perl, plus Makefile/justfile/Taskfile targets, Bazel, CI files (GitHub Actions, GitLab, CircleCI, Azure, Travis, Jenkins, Buildkite, Bitbucket), docker-compose services and umbrella repositories. Tested on macOS, Linux and Windows.</p>
+  </section>
+
+  <section id="commands">
+    <h2>Commands and tool</h2>
+    <table>
+      <tbody>
+        <tr><td><code>/profile</code></td><td>show the profile, checks, availability and cache path</td></tr>
+        <tr><td><code>/profile doctor</code></td><td>required vs installed runtimes, tool and dependency availability, fix commands (never run)</td></tr>
+        <tr><td><code>/profile set &lt;key&gt; &lt;cmd&gt;</code></td><td>override <code>typecheck</code>, <code>lint</code>, <code>test</code>, <code>build</code>, … (<code>-</code> disables)</td></tr>
+        <tr><td><code>/profile tests allow|deny|ask</code></td><td>test-tier permission (same for <code>build</code>)</td></tr>
+        <tr><td><code>/verify [fast|lint|test|build|all] [file…]</code></td><td>run checks now, showing every failure</td></tr>
+        <tr><td><code>run_checks</code></td><td>the same, as a tool the model can call mid-task</td></tr>
+      </tbody>
+    </table>
+    <p>The package also ships an <a href="https://agentskills.io">Agent Skill</a> (<code>/skill:project-profile</code>) that the model loads on demand to interpret verification messages and explain configuration. Full reference: <a href="https://github.com/jlrrequina/pi-project-profile#readme">README</a>.</p>
+  </section>
+
+  <section id="faq">
+    <h2>FAQ</h2>
+    <h3>Does it work with Claude Code, Cursor, Codex or GitHub Copilot?</h3>
+    <p>It is an extension for the π coding agent only. It does read the instruction files those tools use (<code>CLAUDE.md</code>, <code>.cursorrules</code>, <code>.cursor/rules</code>, <code>copilot-instructions.md</code>, <code>.github/instructions</code>, Windsurf and Cline rules, <code>GEMINI.md</code>, <code>codex.md</code>), so a repository already set up for them is understood by π with no extra configuration.</p>
+    <h3>Does it change anything in my repository?</h3>
+    <p>No. Detection is read-only; the cache and per-repo settings live under <code>~/.pi/agent/project-profile/</code> and logs under <code>$TMPDIR/pi-project-profile/</code>. The automatic checks are the project's own read-only commands; auto-fix commands are suggested, never run.</p>
+    <h3>Will it run my tests or builds automatically?</h3>
+    <p>Only after you allow it once per repository. Typecheck and lint run automatically because they are read-only. Installs, migrations, deploys and anything that needs the network are never run.</p>
+    <h3>What happens when a check fails?</h3>
+    <p>The failing diagnostics go back to the agent, which must fix the cause — not disable the check — and end its turn; the checks re-run. After three rounds, or when a round changes nothing or repeats the same failure, the loop stops and the agent summarizes what is still failing instead of claiming success.</p>
+    <h3>Does it break prompt caching?</h3>
+    <p>No. The <code>&lt;project_profile&gt;</code> section contains no timestamps, branch names or iteration-order-dependent content, so it is byte-identical for every turn of a session.</p>
+    <h3>The detected command is wrong. How do I fix it?</h3>
+    <p><code>/profile set &lt;key&gt; &lt;command&gt;</code> overrides one key for the repository (use <code>-</code> to disable it); <code>/profile doctor</code> explains missing tools; <code>/profile refresh</code> re-detects; <code>/profile note</code> persists guidance for the agent.</p>
+  </section>
+
+  <footer>
+    <p>MIT © John Lenard Requina · <a href="https://github.com/jlrrequina/pi-project-profile">Source</a> · <a href="https://github.com/jlrrequina/pi-project-profile/blob/main/SECURITY.md">Security policy</a> · <a href="https://github.com/jlrrequina/pi-project-profile/issues">Issues</a> · Releases are published from GitHub Actions with npm provenance.</p>
+  </footer>
+</main>
+</body>
+</html>

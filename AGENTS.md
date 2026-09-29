@@ -10,6 +10,7 @@ A π (pi-coding-agent) extension package. `README.md` is the user-facing referen
 - **Never write into the target repository.** All state goes under `~/.pi/agent/project-profile/` or `$TMPDIR/pi-project-profile/`.
 - **Never auto-run installs, migrations, deploys, or anything network-bound.** Tests and builds are confirm-once tiers (`TIER_POLICY` in `types.ts`). When unsure, fail to a no-op — never to a wrong action.
 - **Bump `DETECTOR_VERSION`** in `detect/index.ts` whenever detector output shape or semantics change (it invalidates cached profiles).
+- **Discoverability metadata is tested** (`test/package.test.ts`). The npm `description` must stay ≤ 250 characters (the registry truncates at 255; the π catalog card shows ~250). `skills/project-profile/SKILL.md` follows the Agent Skills spec (name = directory name, description ≤ 1024 characters, states when to use it) and must document every `/profile` subcommand and config key that exists. `llms.txt` links only to files that exist. `docs/site/index.html`, `sitemap.xml` and `.github/workflows/pages.yml` must agree (the test checks). When a command, config key or behaviour changes, update the README, the skill and the site together.
 
 ## Verify your changes
 
