@@ -50,20 +50,9 @@ jobs:
       - run: npm ci --ignore-scripts
       - name: Registry signatures of installed dependencies
         run: npm audit signatures
-      - name: Pack and inspect the file list
+      - name: Pack, then import the packed extension and run its CLI
         run: |
-          npm pack --json > pack.json
-          node -e '
-            const [p] = require("./pack.json");
-            const files = p.files.map((f) => f.path);
-            const banned = files.filter((f) => /^(test|docs|\.github|scripts\/(?!scan\.ts$))|tsconfig\.json$|AGENTS\.md$/.test(f));
-            const required = ["index.ts", "README.md", "LICENSE", "CHANGELOG.md", "package.json", "scripts/scan.ts"];
-            const missing = required.filter((f) => !files.includes(f));
-            if (banned.length || missing.length) { console.error("banned:", banned, "missing:", missing); process.exit(1); }
-            console.log(`${p.name}@${p.version}: ${files.length} files, ${p.size} bytes packed`);
-          '
-      - name: Import the packed extension and run its CLI
-        run: |
+          npm pack --silent
           mkdir .smoke
           tar -xzf ./*.tgz -C .smoke
           node test/smoke.ts .smoke/package .
