@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.1.0 — 2026-09-29
+
 - **Bundled Agent Skill** `project-profile` (`/skill:project-profile`): an operating and troubleshooting guide the model loads on demand — how to read the `<project_profile>` section, what each `[verification]` message means and what to do, the `run_checks` tool, every `/profile` and `/verify` command, a symptom → fix table and all configuration keys. Declared in the `pi` manifest and listed in the π package catalog as a skill.
 - `llms.txt` (llmstxt.org format) at the package root and on the site, linking the README, skill, changelog, contributor and security documents for language models and agents.
 - Landing site at <https://jlrrequina.github.io/pi-project-profile/> (static; Open Graph and Twitter cards, `SoftwareApplication`/`SoftwareSourceCode`/`FAQPage` structured data, `sitemap.xml`), published by a pinned Pages workflow.
