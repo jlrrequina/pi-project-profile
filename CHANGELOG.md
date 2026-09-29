@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.0.1 — 2026-09-29
+
 - Fixed: paths from tool calls are resolved through symlinks, so files in a symlinked checkout are grouped with their project, shown relative to it and attributed correctly by the review of changes.
 - Fixed: the "N known" count of pre-existing failures no longer includes package-manager wrapper lines (`npm error Lifecycle script … failed`).
 - Releases are published from GitHub Actions: npm trusted publishing with provenance for the tagged commit, and the same tarball, with a build attestation, on the GitHub release.
