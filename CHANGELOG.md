@@ -1,5 +1,18 @@
 # Changelog
 
+## 1.0.0 — 2026-09-29
+
+- **Pre-existing failures.** Diagnostics recorded before a prompt form its baseline (normalised: no line numbers or timings, error codes kept, counted as a multiset). Only new diagnostics make the gate red, reach the agent and form the no-progress signature; a check that fails only with known diagnostics is reported once to the user, does not cost a repair round and no longer blocks the test tier. `/verify` still shows everything.
+- **Review of the agent's changes** (`verify.guard`): added suppressions (`@ts-ignore`, `eslint-disable`, `# type: ignore`, `# noqa`, `#[allow]`, `//nolint`, …), skipped or focused tests, stubs, loosened check configs, deleted test files and removed test cases, secrets (masked, never echoed), unignored `.env` files and dependency changes without a lockfile update. Attribution uses the content captured before the agent's first write, or git `HEAD` for files that were clean when the prompt started. Secrets, stale lockfiles and `.only` get one follow-up turn; weakening added while checks were failing gets one follow-up turn.
+- **Auto-fix hints**: failing format/lint checks come with the exact writing command for the files they ran on (`prettier --write`, `biome check --write`, `eslint --fix`, `ruff check --fix`, `gofmt -w`, `cargo fmt`, …) or the repo's own `format`/`fix` script.
+- **Instructions on demand** (`profile.scopedInstructions`): nested `AGENTS.md`/`AGENTS.override.md`/`CLAUDE.md` that π does not load, and glob-scoped rules (Cursor `.mdc` globs/alwaysApply, Copilot `.instructions.md` applyTo, Windsurf `trigger: glob`) are appended to the first tool result that touches a matching file, once per session (again after compaction).
+- **Generated files**: `.gitattributes` linguist-generated patterns and `DO NOT EDIT`/`@generated` headers; editing one adds a note with the regenerate command. The profile lists generated paths and a `generate` command (package scripts, Makefile/just/Task targets, buf, sqlc, Prisma).
+- **Test conventions and single-test commands** in the profile (`*.test.ts` next to source, `test_*.py` in tests/, …; `vitest run <file> -t`, `pytest <file>::<test>`, `go test -run`, `cargo test -p`, rspec, phpunit, gradle, maven, dotnet, swift, mix, dart, deno).
+- **`/profile doctor`**: required vs installed runtimes (node, python, go, rust, bun), tool and dependency availability, and the commands that would fix them (never run).
+- **Parallel checks**: read-only tiers run concurrently (`verify.concurrency`, auto = half the cores, max 4); tools sharing a lock (cargo, gradle, go, …) stay serial; tests and builds run one at a time.
+- **Windows**: separator-safe home guard, `/verify` paths, context-file matching and cross-drive files; CI on Linux, macOS and Windows.
+- Detector version 11.
+
 ## 0.2.0 — 2026-09-29
 
 - Scoped test runs: when the changed files allow it, the test tier runs `vitest related --run`, `jest --findRelatedTests`, `go test ./<pkg>/...`, `cargo test -p <package>` (workspace root package; members already run in their own directory) or `pytest <changed test files>` instead of the whole suite. Config/manifest changes, unknown file kinds and ambiguous mappings fall back to the full run; previously failing checks keep their file list across repair rounds. The binary is still resolved at run time.

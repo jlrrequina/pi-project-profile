@@ -27,7 +27,10 @@
     "test-runner",
     "monorepo",
     "AGENTS.md",
-    "developer-tools"
+    "developer-tools",
+    "code-review",
+    "secrets",
+    "cursor-rules"
   ],
   "homepage": "https://github.com/jlrrequina/pi-project-profile#readme",
   "repository": {
@@ -59,7 +62,8 @@
   "pi": {
     "extensions": [
       "./index.ts"
-    ]
+    ],
+    "image": "https://raw.githubusercontent.com/jlrrequina/pi-project-profile/main/docs/cover.png"
   },
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.87.0",

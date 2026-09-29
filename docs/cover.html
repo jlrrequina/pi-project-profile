@@ -1,0 +1,70 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { width: 1280px; height: 640px; background: #0b0e14; font-family: "SF Mono", Menlo, Consolas, monospace; color: #c9d1d9; overflow: hidden; }
+  .wrap { padding: 34px 40px; height: 100%; display: flex; flex-direction: column; gap: 22px; }
+  header { display: flex; align-items: baseline; justify-content: space-between; }
+  h1 { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; font-size: 40px; font-weight: 700; color: #e6edf3; letter-spacing: -0.5px; }
+  h1 .pi { color: #7ee787; }
+  .tag { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; font-size: 20px; color: #8b949e; }
+  .panels { display: grid; grid-template-columns: 1.25fr 1fr; gap: 22px; flex: 1; min-height: 0; }
+  .term { background: #0d1117; border: 1px solid #30363d; border-radius: 12px; padding: 18px 20px; font-size: 15.5px; line-height: 1.62; overflow: hidden; }
+  .bar { display: flex; gap: 7px; margin-bottom: 12px; }
+  .bar i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
+  .t { color: #8b949e; font-size: 13px; margin-left: 10px; }
+  .k { color: #79c0ff; }
+  .c { color: #ffa657; }
+  .dim { color: #6e7681; }
+  .red { color: #ff7b72; }
+  .green { color: #7ee787; }
+  .amber { color: #e3b341; }
+  .line { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .gap { height: 10px; }
+  footer { font-family: -apple-system, "Helvetica Neue", Arial, sans-serif; font-size: 18px; color: #8b949e; display: flex; justify-content: space-between; }
+  footer b { color: #e6edf3; font-weight: 600; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1><span class="pi">π</span> project-profile</h1>
+    <div class="tag">knows any repo · checks every change</div>
+  </header>
+  <div class="panels">
+    <div class="term">
+      <div class="bar"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i><span class="t">system prompt · ~/projects/zod</span></div>
+      <div class="line dim">&lt;project_profile&gt;</div>
+      <div class="line">- <span class="k">Stack:</span> monorepo: pnpm workspaces (8 packages) · Vitest</div>
+      <div class="line">- <span class="k">Commands:</span> typecheck <span class="c">`pnpm exec tsc --noEmit -p tsconfig.json`</span></div>
+      <div class="line">&nbsp;&nbsp;lint <span class="c">`pnpm run lint`</span> · test <span class="c">`pnpm run test`</span></div>
+      <div class="line">&nbsp;&nbsp;test one <span class="c">`pnpm exec vitest run &lt;file&gt; -t "&lt;name&gt;"`</span></div>
+      <div class="line">- <span class="k">Conventions:</span> ESM · Prettier · Biome · Husky git hooks</div>
+      <div class="line">- <span class="k">Tests:</span> <span class="c">`*.test.ts`</span> in tests/ (202)</div>
+      <div class="line">- <span class="k">Instruction files:</span> AGENTS.md (loaded) · .cursorrules (22 KB)</div>
+      <div class="line">- <span class="k">Verification:</span> runs typecheck, lint, format automatically;</div>
+      <div class="line">&nbsp;&nbsp;asks once before running tests</div>
+      <div class="line dim">&lt;/project_profile&gt;</div>
+    </div>
+    <div class="term">
+      <div class="bar"><i style="background:#ff5f56"></i><i style="background:#ffbd2e"></i><i style="background:#27c93f"></i><span class="t">while editing · after the turn</span></div>
+      <div class="line"><span class="k">[project-profile]</span> packages/api/AGENTS.md</div>
+      <div class="line dim">&nbsp;&nbsp;nested rules, delivered on first read</div>
+      <div class="line"><span class="k">[project-profile]</span> src/gen/client.ts is generated</div>
+      <div class="line dim">&nbsp;&nbsp;hand edits are overwritten — regenerate instead</div>
+      <div class="gap"></div>
+      <div class="line"><span class="red">[verify]</span> format failed — round 1/3</div>
+      <div class="line">&nbsp;&nbsp;Auto-fix: <span class="c">`prettier --write src/e.ts`</span></div>
+      <div class="line"><span class="amber">[verify]</span> review: a focused test (.only)</div>
+      <div class="line dim">&nbsp;&nbsp;src/b.test.ts:4 — it.only("b is one", …</div>
+      <div class="line"><span class="green">[verify]</span> no new failures</div>
+      <div class="line dim">&nbsp;&nbsp;known: typecheck (1 known, not sent back)</div>
+      <div class="line"><span class="green">✓</span> format · test · typecheck</div>
+    </div>
+  </div>
+  <footer><span><b>pi install npm:@lenard9191/pi-project-profile</b></span><span>30+ ecosystems · never writes into your repo</span></footer>
+</div>
+</body>
+</html>
