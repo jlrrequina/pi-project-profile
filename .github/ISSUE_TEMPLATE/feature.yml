@@ -1,0 +1,15 @@
+name: Feature request
+description: A check, ecosystem or behaviour you would like
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What is missing or goes wrong today? A public repository that shows it helps most.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal

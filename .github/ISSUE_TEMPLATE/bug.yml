@@ -1,0 +1,35 @@
+name: Bug report
+description: Wrong detection, a check that misbehaved, or anything else broken
+labels: [bug]
+body:
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      options:
+        - Detection (profile, commands, checks)
+        - Verification (gate, repair loop)
+        - Review of the agent's changes
+        - Instructions on demand / generated files
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: Output
+      description: "`/profile`, or for the gate the relevant lines of `$TMPDIR/pi-project-profile/debug.jsonl` (run π with `PI_PROJECT_PROFILE_DEBUG=1`). Remove anything private."
+      render: text
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      placeholder: "package 1.0.0 · π 0.87.1 · macOS 15 · Node 24"
+    validations:
+      required: true
