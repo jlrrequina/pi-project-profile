@@ -59,6 +59,8 @@ jobs:
           file="$(npm pack --json | node -p 'JSON.parse(require("fs").readFileSync(0, "utf8"))[0].filename')"
           mkdir "$RUNNER_TEMP/smoke"
           tar -xzf "$file" -C "$RUNNER_TEMP/smoke"
+          # π provides its own packages to extensions at runtime; the dev dependencies stand in for it
+          ln -s "$PWD/node_modules" "$RUNNER_TEMP/smoke/node_modules"
           node test/smoke.ts "$RUNNER_TEMP/smoke/package" .
       - name: Coverage (fails below the floor)
         run: |

@@ -5,6 +5,9 @@
  * shipped dev CLI works.
  *
  *   node test/smoke.ts <extracted-package-dir> [<repo-to-scan>]
+ *
+ * π's own packages (@earendil-works/*) must be resolvable from the extracted
+ * directory, as π provides them at runtime: link a node_modules next to it.
  */
 import { spawnSync } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
