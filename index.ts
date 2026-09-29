@@ -303,7 +303,13 @@ export default function projectProfile(pi: ExtensionAPI) {
     debug("findings", { seq: st.prompt.seq, cont, found: found.map((f) => ({ kind: f.kind, file: f.file, lines: f.lines })) });
     const lines = ["[verification] review of this task's changes:", ...found.map(formatFinding), ""];
     if (gamed) lines.push("You added these while verification was failing. Remove them and fix the underlying problem; if one is genuinely needed, keep it and justify it in your final message to the user.");
-    else if (cont) lines.push("Fix these before finishing: run the lockfile command, remove `.only`, move credentials into environment variables or untracked config (unless the user explicitly asked otherwise) — or explain in your final message why they must stay.");
+    else if (cont) {
+      const todo: string[] = [];
+      if (found.some((f) => f.kind === "lockfile")) todo.push("run the lockfile command shown");
+      if (found.some((f) => f.kind === "focus")) todo.push("remove the `.only`/focus marker");
+      if (found.some((f) => f.kind === "secret")) todo.push("move credentials into environment variables or untracked config");
+      lines.push(`Before finishing: ${todo.join("; ")} — unless the user explicitly asked for it, in which case say so in your final message.`);
+    }
     else lines.push("(Shown to the user. No automatic follow-up.)");
     return { draft: { type: "custom_message", customType: VERIFY_MSG, content: lines.join("\n"), display: true, details: { seq: st.prompt.seq, kind: "finding", headline: `review: ${summary}` } }, cont };
   }
