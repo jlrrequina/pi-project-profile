@@ -1,4 +1,4 @@
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { expandDirGlob, hasNodeModules, isFile, readJson, relTo, uniq } from "../fs-utils.ts";
 import { NODE_BIN_PREFIX } from "../types.ts";
 import { scopeFromScript } from "../verify/scope.ts";
@@ -158,7 +158,7 @@ export function detectNode(b: Builder): void {
     // A workspace member: inherit the workspace's package manager (its lockfile lives at the workspace root).
     pm = workspace.pm;
     pmVersion = workspace.pmVersion;
-    b.add(`workspace member of ${workspace.name ?? relTo(b.root, workspace.root)}`);
+    b.add(`workspace member of ${workspace.name ?? basename(workspace.root)}`);
   } else if (isDeno) pm = "deno";
   else if (b.hasFile("bunfig.toml")) pm = "bun";
   else b.note("no lockfile found; assuming npm");

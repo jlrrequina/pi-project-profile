@@ -6,15 +6,15 @@ import { test } from "node:test";
 import { loadConfig } from "../config.ts";
 import { composeServices, parseToolVersions, tomlHasTable, tomlKeys, tomlSections } from "../detect/context.ts";
 import { detectProject, findProjectRoot, nearestProjectDir } from "../detect/index.ts";
-import { expandDirGlob, stripJsonComments } from "../fs-utils.ts";
+import { executableCandidates, expandDirGlob, findNodeBin, stripJsonComments } from "../fs-utils.ts";
 import { effectiveChecks, renderPromptSection, tierAllowed } from "../profile/render.ts";
 import { emptyUserData, isStale, loadOrDetect, updateUser } from "../profile/store.ts";
 import { DEFAULT_CONFIG, type StoredProfile } from "../types.ts";
 import { classifyFailure } from "../verify/classify.ts";
 import { buildPlan, isDocOnly } from "../verify/plan.ts";
 import { pruneOutput } from "../verify/prune.ts";
-import { resolveArgv } from "../verify/resolve.ts";
-import { runCommand } from "../verify/run.ts";
+import { resolveArgv, resolvePython } from "../verify/resolve.ts";
+import { platformArgv, runCommand } from "../verify/run.ts";
 import { scopeCheck, scopeFromScript } from "../verify/scope.ts";
 import { collectChanges, newTracker, peekChanges, snapshotStart, toolPath } from "../verify/changes.ts";
 import { runCheck } from "../verify/gate.ts";
@@ -375,6 +375,63 @@ test("pnpm workspace: package files run the package's own typecheck with the wor
   rmSync(root, { recursive: true, force: true });
 });
 
+// ---------------------------------------------------------------- cargo check targets + windows paths
+test("cargo check: --all-targets only when tests/benches/examples or #[cfg(test)] code changed", () => {
+  const root = tmp();
+  write(root, "Cargo.toml", `[package]\nname = "x"\n`);
+  write(root, "src/lib.rs", "pub fn a() {}\n");
+  write(root, "src/tested.rs", "pub fn b() {}\n#[cfg(test)]\nmod tests { #[test] fn t() {} }\n");
+  write(root, "tests/it.rs", "#[test]\nfn it() {}\n");
+  const check = { id: "cargo:check", tier: "fast" as const, label: "typecheck", cwd: root, source: "t", requires: {}, cmd: "cargo check --all-targets", argv: ["cargo", "check", "--all-targets", "--quiet"], scope: { kind: "cargo-check" as const } };
+  assert.deepEqual(scopeCheck(check, ["src/lib.rs"]), { argv: ["cargo", "check", "--quiet"], cmd: "cargo check" });
+  assert.equal(scopeCheck(check, ["src/lib.rs", "tests/it.rs"]), undefined);
+  assert.equal(scopeCheck(check, ["src/tested.rs"]), undefined);
+  assert.equal(scopeCheck(check, ["src/lib.rs", "Cargo.toml"]), undefined);
+  assert.equal(scopeCheck(check, ["crates/a/benches/b.rs"]), undefined);
+  const detected = detectProject(root, config);
+  assert.equal(detected.checks.find((c) => c.id === "cargo:check")?.scope?.kind, "cargo-check");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("windows: PATHEXT lookup, .cmd shims in node_modules/.bin, venv Scripts/, shell translation, no process-group kill", async () => {
+  const root = tmp();
+  const prevPlatform = Object.getOwnPropertyDescriptor(process, "platform")!;
+  const prevPathExt = process.env.PATHEXT;
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  process.env.PATHEXT = ".COM;.EXE;.BAT;.CMD";
+  try {
+    assert.deepEqual(executableCandidates("npm"), ["npm.com", "npm.exe", "npm.bat", "npm.cmd", "npm"]);
+    assert.deepEqual(executableCandidates("tool.exe"), ["tool.exe"]);
+    mkdirSync(join(root, "node_modules", ".bin"), { recursive: true });
+    writeFileSync(join(root, "node_modules", ".bin", "tsc"), "#!/bin/sh\n", { mode: 0o755 });
+    writeFileSync(join(root, "node_modules", ".bin", "tsc.cmd"), "@echo off\r\n", { mode: 0o755 });
+    assert.equal(findNodeBin(join(root, "pkg"), "tsc"), join(root, "node_modules", ".bin", "tsc.cmd"));
+    mkdirSync(join(root, ".venv", "Scripts"), { recursive: true });
+    writeFileSync(join(root, ".venv", "Scripts", "mypy.exe"), "", { mode: 0o755 });
+    assert.deepEqual(resolvePython(root, "pip", "mypy"), [join(root, ".venv", "Scripts", "mypy.exe")]);
+    // argv translation for cmd.exe
+    assert.deepEqual(platformArgv(["sh", "-c", "npm run lint"], true), { file: "npm run lint", args: [], shell: true });
+    assert.deepEqual(platformArgv(["C:\\p\\node_modules\\.bin\\tsc.cmd", "--noEmit", "-p", "my dir/tsconfig.json"], true), { file: "C:\\p\\node_modules\\.bin\\tsc.cmd", args: ["--noEmit", "-p", '"my dir/tsconfig.json"'], shell: true });
+    assert.deepEqual(platformArgv(["cargo", "check"], true), { file: "cargo", args: ["check"], shell: false });
+    assert.deepEqual(platformArgv(["sh", "-c", "echo hi"], false), { file: "sh", args: ["-c", "echo hi"], shell: false });
+  } finally {
+    Object.defineProperty(process, "platform", prevPlatform);
+    if (prevPathExt === undefined) delete process.env.PATHEXT;
+    else process.env.PATHEXT = prevPathExt;
+    rmSync(root, { recursive: true, force: true });
+  }
+  // The non-group kill path (what Windows uses) must still end a hung check on timeout.
+  Object.defineProperty(process, "platform", { value: "win32", configurable: true });
+  try {
+    const started = Date.now();
+    const slow = await runCommand(["/bin/sh", "-c", "sleep 30"], { cwd: tmpdir(), timeoutMs: 300 });
+    assert.ok(slow.timedOut);
+    assert.ok(Date.now() - started < 5000);
+  } finally {
+    Object.defineProperty(process, "platform", prevPlatform);
+  }
+});
+
 // ---------------------------------------------------------------- runner
 test("runCommand: exit codes, timeout kills process group, output capture", async () => {
   const ok = await runCommand(["sh", "-c", "echo out; echo err 1>&2; exit 3"], { cwd: tmpdir(), timeoutMs: 5000 });
@@ -410,6 +467,12 @@ test("resolveArgv binds node_modules/.bin and python tools at run time", () => {
   assert.ok(nope.missing);
   const plain = resolveArgv({ ...base, argv: ["/no/such/binary", "a"] });
   assert.ok(plain.missing);
+  // path heads are re-checked every time (a tool installed mid-session must not stay "missing")
+  const late = join(root, "vendor", "bin", "phpstan");
+  assert.ok(resolveArgv({ ...base, argv: [late, "analyse"] }).missing);
+  mkdirSync(join(root, "vendor", "bin"), { recursive: true });
+  writeFileSync(late, "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  assert.deepEqual(resolveArgv({ ...base, argv: [late, "analyse"] }).argv, [late, "analyse"]);
   rmSync(root, { recursive: true, force: true });
 });
 

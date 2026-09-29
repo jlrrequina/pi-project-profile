@@ -1,6 +1,6 @@
 {
   "name": "@lenard9191/pi-project-profile",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Pi coding-agent extension that auto-detects any repository's stack, commands, conventions, CI checks and AGENTS.md/CLAUDE.md-style instruction files, injects a stable <project_profile> section into the system prompt, and verifies the agent's changes after every turn by running the project's own typecheck/lint (and, once confirmed, tests/build) with a bounded self-repair loop. Works for Node/TypeScript, Rust, Go, Python, Ruby, JVM, .NET, Swift, PHP, Elixir, Dart and more. Never writes into the repo.",
   "type": "module",
   "license": "MIT",

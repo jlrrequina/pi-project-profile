@@ -85,7 +85,7 @@ export function detectRust(b: Builder): void {
   if (!cargoBin) b.note("cargo not on PATH — Rust checks skipped");
 
   const exts = [".rs", ".toml"];
-  b.check({ id: "cargo:check", tier: "fast", label: "typecheck", cmd: "cargo check --all-targets", argv: ["cargo", "check", "--all-targets", "--quiet", "--color", "never"], source: "Cargo.toml", exts, requires, tool: "cargo" });
+  b.check({ id: "cargo:check", tier: "fast", label: "typecheck", cmd: "cargo check --all-targets", argv: ["cargo", "check", "--all-targets", "--quiet", "--color", "never"], source: "Cargo.toml", exts, requires, tool: "cargo", scope: { kind: "cargo-check" } });
   b.check({ id: "cargo:fmt", tier: "lint", label: "format", cmd: "cargo fmt --check", argv: ["cargo", "fmt", "--check"], source: "Cargo.toml", exts: [".rs"], requires: { bin: "cargo", hint: "rustfmt component missing (rustup component add rustfmt)" }, tool: "rustfmt" });
   if (b.hasFile("clippy.toml") || b.hasFile(".clippy.toml") || tomlHasTable(cargo, "lints")) {
     b.check({ id: "cargo:clippy", tier: "lint", label: "lint", cmd: "cargo clippy --all-targets", argv: ["cargo", "clippy", "--all-targets", "--quiet", "--color", "never"], source: "clippy config present", exts, requires: { bin: "cargo", hint: "clippy component missing (rustup component add clippy)" }, tool: "cargo" });

@@ -44,7 +44,7 @@ The section is identical for every turn of a session, so prompt caching keeps wo
 
 Installs, migrations, deploys and anything network-bound are never run.
 
-Test runs are narrowed to the changed files when the runner allows it — `vitest related`, `jest --findRelatedTests`, `go test ./<pkg>/...`, `cargo test -p <package>`, `pytest <changed test files>` — and fall back to the full run whenever that is not safe (config or manifest changed, unknown file kinds). Files in a monorepo package or workspace member are checked with that package's own commands, in its directory.
+Test runs are narrowed to the changed files when the runner allows it — `vitest related`, `jest --findRelatedTests`, `go test ./<pkg>/...`, `cargo test -p <package>`, `pytest <changed test files>` — and fall back to the full run whenever that is not safe (config or manifest changed, unknown file kinds). `cargo check` drops `--all-targets` when no test, bench or example code changed. Files in a monorepo package or workspace member are checked with that package's own commands, in its directory.
 
 Failures come back to the agent pruned (diagnostic lines first, ~40 lines, full log path). The loop stops after `maxRepairRounds` (3), when a round changes no files, or when the same failure repeats — then the agent is asked for a summary instead of stopping silently. Environment failures (missing tool, deps not installed, timeout, database down) go to *you* as a notification and disable that check for the session.
 

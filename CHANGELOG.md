@@ -1,11 +1,14 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-09-29
 
 - Scoped test runs: when the changed files allow it, the test tier runs `vitest related --run`, `jest --findRelatedTests`, `go test ./<pkg>/...`, `cargo test -p <package>` (workspace root package; members already run in their own directory) or `pytest <changed test files>` instead of the whole suite. Config/manifest changes, unknown file kinds and ambiguous mappings fall back to the full run; previously failing checks keep their file list across repair rounds. The binary is still resolved at run time.
 - `verify.perTurn` (default off): run the syntax + fast tiers after every turn that changed files (tool writes, or a git peek when a shell tool ran) and append a non-continuing informational note when red. Earlier per-turn notes are superseded to keep context small.
 - Monorepos: a package's files are checked with the package's own scripts/binaries in its directory, rendered with the workspace's package manager (a member without its own lockfile inherits pnpm/yarn/bun/npm from the workspace root). When the root also runs a workspace-wide command for the same check (`turbo`, `nx`, `pnpm -r`, `--workspaces`, `tsc -b` over references, ...) the package-level duplicate is skipped.
-- Boundary handlers now carry entries queued by earlier extensions instead of replacing the draft chain.
+- `cargo check` runs without `--all-targets` unless a test/bench/example target, `#[cfg(test)]` code or a manifest changed.
+- Windows: executables resolve through `PATHEXT` (`npm` → `npm.cmd`), `node_modules/.bin/*.cmd` shims and venv `Scripts/` are used, `.cmd`/`.bat` and CI `sh -c` commands run through the shell, and timeouts kill the child directly (no process groups).
+- Fixed: boundary handlers now keep entries queued by earlier extensions instead of replacing the draft chain.
+- Fixed: a tool installed mid-session (e.g. `vendor/bin/phpstan` after `composer install`) is no longer reported missing until restart.
 - Detector version 10 (new `scope` and `coversWorkspace` fields on checks).
 
 ## 0.1.0 — 2026-09-29

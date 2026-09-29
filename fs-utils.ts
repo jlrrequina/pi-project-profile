@@ -144,20 +144,31 @@ export function sha1File(p: string): string | undefined {
 
 const whichCache = new Map<string, string | undefined>();
 
-/** Resolve an executable on PATH without spawning. Absolute paths are checked directly. */
+export function isWindows(): boolean {
+  return process.platform === "win32";
+}
+
+/** Candidate file names for an executable: the name itself, plus PATHEXT variants on Windows (`npm` → `npm.cmd`). */
+export function executableCandidates(name: string): string[] {
+  if (!isWindows()) return [name];
+  const exts = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+  const hasExt = exts.some((e) => name.toLowerCase().endsWith(e.toLowerCase()));
+  return hasExt ? [name] : [...exts.map((e) => name + e.toLowerCase()), name];
+}
+
+/** Resolve an executable on PATH without spawning. Paths are checked directly (never cached: `vendor/bin/*` can appear mid-session). */
 export function which(bin: string): string | undefined {
   if (!bin) return undefined;
+  if (isAbsolute(bin) || bin.includes(sep) || bin.includes("/")) return executableCandidates(bin).find((c) => isExecutable(c));
   if (whichCache.has(bin)) return whichCache.get(bin);
   let found: string | undefined;
-  if (isAbsolute(bin) || bin.includes(sep)) {
-    found = isExecutable(bin) ? bin : undefined;
-  } else {
-    const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
-    for (const dir of dirs) {
-      const candidate = join(dir, bin);
+  const dirs = (process.env.PATH ?? "").split(delimiter).filter(Boolean);
+  outer: for (const dir of dirs) {
+    for (const c of executableCandidates(bin)) {
+      const candidate = join(dir, c);
       if (isExecutable(candidate)) {
         found = candidate;
-        break;
+        break outer;
       }
     }
   }
@@ -203,10 +214,25 @@ export function findGitRoot(start: string): string | undefined {
   return findUp(start, (d) => exists(join(d, ".git")));
 }
 
-/** Resolve `node_modules/.bin/<tool>` walking up from dir (stops at root or fs root). */
+/** Resolve `node_modules/.bin/<tool>` walking up from dir (stops at root or fs root). On Windows the `.cmd` shim wins over the extension-less shell script. */
 export function findNodeBin(dir: string, tool: string, stopAt?: string): string | undefined {
-  const hit = findUp(dir, (d) => isExecutable(join(d, "node_modules", ".bin", tool)), stopAt);
-  return hit ? join(hit, "node_modules", ".bin", tool) : undefined;
+  const names = executableCandidates(tool);
+  let found: string | undefined;
+  findUp(
+    dir,
+    (d) => {
+      for (const n of names) {
+        const p = join(d, "node_modules", ".bin", n);
+        if (isExecutable(p)) {
+          found = p;
+          return true;
+        }
+      }
+      return false;
+    },
+    stopAt,
+  );
+  return found;
 }
 
 export function hasNodeModules(dir: string, stopAt?: string): boolean {

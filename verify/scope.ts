@@ -10,6 +10,8 @@
  *            routes their files to the member's own profile and cwd; this branch
  *            matters for a workspace root that is itself a package)
  *   pytest   pytest <files> when only test files changed
+ *   cargo-check  plain `cargo check` unless a test/bench/example target (or
+ *            #[cfg(test)] code) changed, in which case --all-targets stays
  *
  * Every rule fails to the full run: a config or manifest change, a file kind
  * the runner cannot trace, or an ambiguous package mapping returns undefined.
@@ -95,6 +97,17 @@ export function scopeCheck(check: Check, files: string[]): Scoped | undefined {
     case "pytest": {
       if (!rel.every((f) => ext(f) === ".py" && PY_TEST_RE.test(basename(f)))) return undefined;
       return { argv: [...check.argv, ...rel], cmd: `${check.cmd} ${filesDisplay(rel)}` };
+    }
+    case "cargo-check": {
+      // Test/bench/example targets only compile with --all-targets; so does #[cfg(test)] code in library sources.
+      const needsAll = rel.some((f) => {
+        if (ext(f) !== ".rs") return true; // Cargo.toml / build.rs etc.: keep the full form
+        if (/^(tests|benches|examples)\//.test(f) || /\/(tests|benches|examples)\//.test(f)) return true;
+        const src = readText(join(check.cwd, f), 512 * 1024) ?? "";
+        return /#\[\s*cfg\s*\(\s*test\s*\)\s*\]|#\[\s*test\s*\]|#\[\s*bench\s*\]/.test(src);
+      });
+      if (needsAll) return undefined;
+      return { argv: check.argv.filter((a) => a !== "--all-targets"), cmd: check.cmd.replace(" --all-targets", "") };
     }
     default:
       return undefined;

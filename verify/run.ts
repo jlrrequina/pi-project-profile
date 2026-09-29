@@ -2,7 +2,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, readdirSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { stripAnsi } from "../fs-utils.ts";
+import { isWindows, stripAnsi } from "../fs-utils.ts";
 
 export interface RunResult {
   code: number | null;
@@ -24,13 +24,35 @@ export interface RunOptions {
   maxBytes?: number;
 }
 
+/** Quote one argument for cmd.exe when a Windows shell is unavoidable (.cmd shims, `sh -c` strings). */
+export function quoteForCmd(arg: string): string {
+  if (arg === "") return '""';
+  if (!/[\s"&|<>^%()]/.test(arg)) return arg;
+  return `"${arg.replace(/"/g, '\\"')}"`;
+}
+
+/**
+ * Windows has no `sh` and cannot spawn `.cmd`/`.bat` shims without a shell
+ * (Node refuses since CVE-2024-27980). Translate the portable argv into
+ * something cmd.exe can run; POSIX argv is returned unchanged.
+ */
+export function platformArgv(argv: string[], win = isWindows()): { file: string; args: string[]; shell: boolean } {
+  const [head = "", ...rest] = argv;
+  if (!win) return { file: head, args: rest, shell: false };
+  if (head === "sh" && rest[0] === "-c" && typeof rest[1] === "string") return { file: rest[1], args: rest.slice(2).map(quoteForCmd), shell: true };
+  if (/\.(cmd|bat)$/i.test(head)) return { file: quoteForCmd(head), args: rest.map(quoteForCmd), shell: true };
+  return { file: head, args: rest, shell: false };
+}
+
 /**
  * Spawn a check in its own process group with a hard timeout. No TTY, no
- * stdin, colours disabled. On timeout/abort the whole group is killed.
+ * stdin, colours disabled. On timeout/abort the whole group is killed
+ * (POSIX); Windows has no process groups, so only the direct child is killed.
  */
 export function runCommand(argv: string[], opts: RunOptions): Promise<RunResult> {
   const started = Date.now();
   const maxBytes = opts.maxBytes ?? 2 * 1024 * 1024;
+  const win = isWindows();
   return new Promise((resolve) => {
     const env: Record<string, string> = {
       ...(process.env as Record<string, string>),
@@ -45,7 +67,8 @@ export function runCommand(argv: string[], opts: RunOptions): Promise<RunResult>
     };
     let proc;
     try {
-      proc = spawn(argv[0]!, argv.slice(1), { cwd: opts.cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
+      const { file, args, shell } = platformArgv(argv, win);
+      proc = spawn(file, args, { cwd: opts.cwd, env, stdio: ["ignore", "pipe", "pipe"], detached: !win, shell, windowsHide: true });
     } catch (err) {
       resolve({ code: null, signal: null, stdout: "", stderr: "", timedOut: false, spawnError: (err as Error).message, durationMs: Date.now() - started, truncated: false });
       return;
@@ -67,7 +90,7 @@ export function runCommand(argv: string[], opts: RunOptions): Promise<RunResult>
     proc.stderr?.on("data", (d: Buffer) => (stderr = append(stderr, d)));
     const killGroup = (sig: NodeJS.Signals) => {
       try {
-        if (process.platform !== "win32" && proc.pid) process.kill(-proc.pid, sig);
+        if (!win && proc.pid) process.kill(-proc.pid, sig);
         else proc.kill(sig);
       } catch {
         try {

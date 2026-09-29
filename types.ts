@@ -38,7 +38,7 @@ export interface CheckRequirement {
  * unknown file kinds, virtual workspace root, …).
  */
 export interface ScopeSpec {
-  kind: "vitest" | "jest" | "go" | "cargo" | "pytest";
+  kind: "vitest" | "jest" | "go" | "cargo" | "cargo-check" | "pytest";
   /** argv prefix of the scoped form (late-bound head allowed); changed files are appended. Defaults derive from the check's own argv. */
   argv?: string[];
   /** Display prefix of the scoped form. */

@@ -1,5 +1,5 @@
 import { join } from "node:path";
-import { isExecutable } from "../fs-utils.ts";
+import { executableCandidates, isExecutable, isWindows } from "../fs-utils.ts";
 import { PY_PREFIX, type ScopeSpec } from "../types.ts";
 import { pythonDisplay } from "../verify/resolve.ts";
 import type { Builder } from "./context.ts";
@@ -163,7 +163,7 @@ export function detectPython(b: Builder): void {
   } else if (b.hasFile("environment.yml")) {
     manager = "conda";
   }
-  const venvDir = [".venv", "venv", "env", ".env"].find((d) => isExecutable(join(b.root, d, "bin", "python")));
+  const venvDir = [".venv", "venv", "env", ".env"].find((d) => executableCandidates("python").some((n) => isExecutable(join(b.root, d, isWindows() ? "Scripts" : "bin", n))));
   b.add(manager + (venvDir && manager === "pip" ? ` (${venvDir})` : ""));
   if (b.hasFile("tox.ini")) b.add("tox");
   if (b.hasFile("noxfile.py")) b.add("nox");
