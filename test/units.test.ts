@@ -19,6 +19,8 @@ import { scopeCheck, scopeFromScript } from "../verify/scope.ts";
 import { collectChanges, newTracker, peekChanges, snapshotStart, toolPath } from "../verify/changes.ts";
 import { addedLines, collectFindings, formatFinding, isWeakening, mustFix, SKIP } from "../verify/findings.ts";
 import { fixHint } from "../verify/hints.ts";
+import { testConventions } from "../detect/tests.ts";
+import { doctorReport, satisfies } from "../profile/doctor.ts";
 import { discoverRules, generatedPatterns, generatedReason, globToRegExp, matchingRules, nestedInstructionFiles, parseFrontmatter, readInstruction, renderInjection } from "../profile/scoped.ts";
 import { defaultConcurrency, runCheck, runGate, runPool } from "../verify/gate.ts";
 import { analyzeDiagnostics, normalizeDiag, splitByBaseline } from "../verify/baseline.ts";
@@ -714,6 +716,62 @@ test("generated files: linguist-generated patterns and DO NOT EDIT headers; gene
   assert.equal(detectProject(mk, config).commands["generate"]?.cmd, "make generate");
   rmSync(root, { recursive: true, force: true });
   rmSync(mk, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------- test conventions, single-test command, doctor
+test("testConventions picks the dominant naming pattern and where tests live", () => {
+  const files = ["src/a.ts", "src/a.test.ts", "src/b/b.test.ts", "src/c.test.ts", "tests/test_x.py", "tests/test_y.py", "tests/unit/test_z.py", "README.md"];
+  assert.equal(testConventions(files), "`*.test.ts` next to source (3) · `test_*.py` in tests/ (3)");
+  assert.equal(testConventions(["pkg/a_test.go", "pkg/b_test.go", "main.go"]), "`*_test.go` next to source (2)");
+  assert.equal(testConventions(["src/test/java/com/x/FooTest.java", "src/test/java/com/x/BarTest.java"]), "`*Test.java` in src/test/ (2)");
+  assert.equal(testConventions(["src/only.test.ts"]), undefined);
+});
+
+test("single-test commands per runner", () => {
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "x", scripts: { test: "vitest run" }, devDependencies: { vitest: "2" } }));
+  write(root, "pnpm-lock.yaml", "");
+  assert.equal(detectProject(root, config).commands["test:one"]?.cmd, 'pnpm exec vitest run <file> -t "<name>"');
+  const py = tmp();
+  write(py, "pyproject.toml", "[project]\nname='x'\n[tool.pytest.ini_options]\n");
+  write(py, "uv.lock", "");
+  assert.equal(detectProject(py, config).commands["test:one"]?.cmd, "uv run pytest <file>::<test_name>");
+  const go = tmp();
+  write(go, "go.mod", "module m\n\ngo 1.22\n");
+  assert.equal(detectProject(go, config).commands["test:one"]?.cmd, "go test ./<pkg> -run '^<TestName>$'");
+  const section = renderPromptSection({ detected: detectProject(root, config), user: emptyUserData(), updatedAt: "" }, config, { verifyEnabled: true, piLoadedContextFiles: [] });
+  assert.ok(section.includes('test one `pnpm exec vitest run <file> -t "<name>"`'));
+  for (const r of [root, py, go]) rmSync(r, { recursive: true, force: true });
+});
+
+test("satisfies: the version-range forms projects use; unknown ranges stay unknown", () => {
+  assert.equal(satisfies("22.4.1", "22"), true);
+  assert.equal(satisfies("24.1.0", "22"), false);
+  assert.equal(satisfies("24.1.0", ">=22"), true);
+  assert.equal(satisfies("20.9.0", ">=18 <21"), true);
+  assert.equal(satisfies("21.0.0", ">=18 <21"), false);
+  assert.equal(satisfies("20.11.1", "^20.10"), true);
+  assert.equal(satisfies("21.0.0", "^20.10"), false);
+  assert.equal(satisfies("3.12.4", "3.12"), true);
+  assert.equal(satisfies("3.11.9", ">=3.11,<3.13"), true);
+  assert.equal(satisfies("3.13.0", "~=3.11"), true);
+  assert.equal(satisfies("18.2.0", "16 || 18"), true);
+  assert.equal(satisfies("18.2.0", "20.x"), false);
+  assert.equal(satisfies("22.0.0", "lts/*"), undefined);
+});
+
+test("doctor: runtime mismatch, missing dependencies and unavailable checks come with fix commands", () => {
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "x", scripts: { typecheck: "tsc --noEmit" }, devDependencies: { typescript: "5" } }));
+  write(root, "package-lock.json", "{}");
+  write(root, ".nvmrc", "1\n");
+  const stored: StoredProfile = { detected: detectProject(root, config), user: emptyUserData(), updatedAt: "" };
+  const report = doctorReport(stored, effectiveChecks(stored), new Map());
+  assert.ok(report.includes("⚠ node: requires `1`"), report);
+  assert.ok(report.includes("✗ node_modules missing — run `npm ci`"));
+  assert.ok(report.includes("✗ typecheck"));
+  assert.ok(/## Fix[\s\S]*`npm ci`/.test(report));
+  rmSync(root, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------- runner

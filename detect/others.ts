@@ -41,9 +41,11 @@ export function detectRuby(b: Builder): void {
   }
   if (rbDir("spec") && (has("rspec") || has("rspec-rails") || has("rspec-core"))) {
     b.command("test", bx("rspec"), "spec/");
+    b.command("test:one", bx("rspec <file>:<line>"), "rspec");
     b.check({ id: "rb:rspec", tier: "test", label: "test", cmd: bx("rspec"), argv: bxArgv(["rspec", "--no-color", "--fail-fast"]), source: "spec/ + rspec", exts: [".rb", ".erb", ".rake", ".yml"], requires: req, tool: "rspec" });
   } else if (rbDir("test") && b.hasFile("Rakefile")) {
     b.command("test", bx("rake test"), "Rakefile");
+    b.command("test:one", b.hasFile("bin/rails") ? "bin/rails test <file>:<line>" : bx("ruby -Itest <file> -n <test_name>"), "minitest");
     b.check({ id: "rb:rake-test", tier: "test", label: "test", cmd: bx("rake test"), argv: bxArgv(["rake", "test"]), source: "Rakefile test/", exts: [".rb", ".erb", ".rake", ".yml"], requires: req, tool: "minitest" });
   }
   if (isRails) {
@@ -95,6 +97,7 @@ export function detectJvm(b: Builder): void {
     const argv0 = wrapper ? join(b.root, "gradlew") : "gradle";
     b.command("build", `${g} build`, gradle);
     b.command("test", `${g} test`, gradle);
+    b.command("test:one", `${g} test --tests '<Class.method>'`, gradle);
     b.command("typecheck", `${g} compileJava${kotlin ? " compileKotlin" : ""} -q`, gradle);
     if (/spotless/.test(all)) b.command("format", `${g} spotlessApply`, gradle);
     if (/spring-boot/.test(all)) b.command("dev", `${g} bootRun`, gradle);
@@ -109,6 +112,7 @@ export function detectJvm(b: Builder): void {
     const req = wrapper ? { files: ["mvnw"] } : { bin: "mvn", hint: "mvn not on PATH" };
     b.command("build", `${m} -q package -DskipTests`, "pom.xml");
     b.command("test", `${m} -q test`, "pom.xml");
+    b.command("test:one", `${m} -q test -Dtest='<Class#method>'`, "pom.xml");
     b.command("typecheck", `${m} -q compile`, "pom.xml");
     if (/spring-boot/.test(all)) b.command("dev", `${m} spring-boot:run`, "pom.xml");
     b.check({ id: "maven:compile", tier: "build", label: "compile", cmd: `${m} -q -B test-compile`, argv: [argv0, "-q", "-B", "test-compile"], source: "pom.xml", exts: [".java", ".kt", ".xml", ".scala"], requires: req, tool: "maven" });
@@ -140,6 +144,7 @@ export function detectDotnet(b: Builder): void {
   b.command("install", `dotnet restore ${target}`, target);
   b.command("build", `dotnet build ${target}`, target);
   b.command("test", `dotnet test ${target}`, target);
+  b.command("test:one", `dotnet test ${target} --filter <Name>`, target);
   b.command("format", `dotnet format ${target}`, target);
   b.check({ id: "dotnet:build", tier: "build", label: "build", cmd: `dotnet build ${target} --nologo`, argv: ["dotnet", "build", target, "--nologo", "-v", "q", "-clp:NoSummary"], source: target, exts: [".cs", ".fs", ".vb", ".csproj", ".fsproj", ".props", ".targets", ".razor", ".cshtml", ".json"], requires: req, tool: "dotnet" });
   b.check({ id: "dotnet:test", tier: "test", label: "test", cmd: `dotnet test ${target} --nologo`, argv: ["dotnet", "test", target, "--nologo", "-v", "q"], source: target, exts: [".cs", ".fs", ".vb", ".csproj", ".fsproj", ".json"], requires: req, tool: "dotnet" });
@@ -172,6 +177,7 @@ export function detectSwift(b: Builder): void {
     const req = { bin: "swift", hint: "swift toolchain not on PATH" };
     b.command("build", "swift build", "Package.swift");
     b.command("test", "swift test", "Package.swift");
+    b.command("test:one", "swift test --filter <TestClass/testMethod>", "Package.swift");
     b.check({ id: "swift:build", tier: "build", label: "build", cmd: "swift build", argv: ["swift", "build"], source: "Package.swift", exts: [".swift"], requires: req, tool: "swift" });
     b.check({ id: "swift:test", tier: "test", label: "test", cmd: "swift test", argv: ["swift", "test"], source: "Package.swift", exts: [".swift"], requires: req, tool: "swift" });
   } else {
@@ -229,9 +235,11 @@ export function detectPhp(b: Builder): void {
   }
   if (has("pestphp/pest")) {
     b.command("test", "vendor/bin/pest", "pest");
+    b.command("test:one", 'vendor/bin/pest --filter "<name>"', "pest");
     b.check({ id: "php:pest", tier: "test", label: "test", cmd: "vendor/bin/pest", argv: [join(b.root, "vendor", "bin", "pest"), "--no-ansi", "--stop-on-failure"], source: "pest", exts: [".php", ".xml", ".env"], requires: { files: ["vendor/bin/pest"], hint }, tool: "phpunit" });
   } else if (has("phpunit/phpunit")) {
     b.command("test", has("laravel/framework") ? "php artisan test" : "vendor/bin/phpunit", "phpunit");
+    b.command("test:one", has("laravel/framework") ? "php artisan test --filter <name>" : "vendor/bin/phpunit --filter <name>", "phpunit");
     b.check({ id: "php:phpunit", tier: "test", label: "test", cmd: "vendor/bin/phpunit", argv: [join(b.root, "vendor", "bin", "phpunit"), "--no-progress", "--colors=never", "--stop-on-failure"], source: "phpunit", exts: [".php", ".xml", ".env"], requires: { files: ["vendor/bin/phpunit"], hint }, tool: "phpunit" });
   }
   if (has("laravel/framework")) {
@@ -261,6 +269,7 @@ export function detectElixir(b: Builder): void {
   b.command("typecheck", "mix compile --warnings-as-errors", "mix.exs");
   b.command("format", "mix format", "mix.exs");
   b.command("test", "mix test", "mix.exs");
+  b.command("test:one", "mix test <file>:<line>", "mix.exs");
   if (/:credo\b/.test(mix)) b.command("lint", "mix credo", "credo");
   if (/:phoenix\b/.test(mix)) b.command("dev", "mix phx.server", "Phoenix");
   if (/:ecto_sql/.test(mix)) b.command("migrate", "mix ecto.migrate", "Ecto");
@@ -291,6 +300,7 @@ export function detectDart(b: Builder): void {
   b.command("typecheck", `${tool} analyze`, "pubspec.yaml");
   b.command("format", "dart format .", "pubspec.yaml");
   b.command("test", `${tool} test`, "pubspec.yaml");
+  b.command("test:one", `${tool} test <file> --plain-name "<name>"`, "pubspec.yaml");
   if (flutter) b.command("run", "flutter run", "pubspec.yaml");
   if (/build_runner/.test(pub)) b.command("build", `${tool} run build_runner build`, "build_runner");
   b.check({ id: "dart:analyze", tier: "fast", label: "analyze", cmd: `${tool} analyze`, argv: [tool, "analyze", "--no-fatal-warnings"], source: "pubspec.yaml", exts: [".dart", ".yaml"], requires: req, tool: "dart" });
@@ -389,6 +399,7 @@ export function detectDeno(b: Builder): void {
   b.command("lint", "deno lint", cfg);
   b.command("format", "deno fmt", cfg);
   b.command("test", "deno test", cfg);
+  b.command("test:one", 'deno test <file> --filter "<name>"', cfg);
   b.check({ id: "deno:check", tier: "fast", label: "typecheck", cmd: "deno check <files>", argv: ["deno", "check"], appendFiles: true, unscopedArgs: ["."], source: cfg, exts: [".ts", ".tsx", ".mts"], requires: req, tool: "deno" });
   b.check({ id: "deno:lint", tier: "lint", label: "lint", cmd: "deno lint <files>", argv: ["deno", "lint"], appendFiles: true, unscopedArgs: [], source: cfg, exts: [".ts", ".tsx", ".js", ".jsx", ".mts"], requires: req, tool: "deno" });
   b.check({ id: "deno:fmt", tier: "lint", label: "format", cmd: "deno fmt --check <files>", argv: ["deno", "fmt", "--check"], appendFiles: true, unscopedArgs: [], source: cfg, exts: [".ts", ".tsx", ".js", ".jsx", ".json", ".md"], requires: req, tool: "deno" });

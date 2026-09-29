@@ -65,7 +65,7 @@ export function renderPromptSection(stored: StoredProfile, config: ProfileConfig
   if (lang.length || rt.length) lines.push(`- Language/runtime: ${[...lang, ...rt].join(" · ")}`);
   if (d.stack.length) lines.push(`- Stack: ${joinTokens(d.stack, 18)}`);
   const cmds = effectiveCommands(stored);
-  const cmdTokens = Object.entries(cmds).map(([k, v]) => `${k} \`${v.cmd}\``);
+  const cmdTokens = Object.entries(cmds).map(([k, v]) => `${k.replace(":", " ")} \`${v.cmd}\``);
   if (cmdTokens.length) lines.push(`- Commands: ${cmdTokens.join(" · ")}`);
   if (d.conventions.length) lines.push(`- Conventions: ${joinTokens(d.conventions, 12)}`);
   if (d.ci) {
@@ -74,6 +74,7 @@ export function renderPromptSection(stored: StoredProfile, config: ProfileConfig
   }
   if (d.layout.length) lines.push(`- Layout: ${d.layout.join(" ")}`);
   if (d.services.length) lines.push(`- Services: ${d.services.join(" · ")}`);
+  if (d.tests) lines.push(`- Tests: ${d.tests}`);
   if (d.generated?.length) {
     const gen = cmds["generate"]?.cmd;
     lines.push(`- Generated (don't hand-edit): ${d.generated.slice(0, 6).map((p) => `\`${p}\``).join(", ")}${d.generated.length > 6 ? ", …" : ""}${gen ? ` — regenerate with \`${gen}\`` : ""}`);

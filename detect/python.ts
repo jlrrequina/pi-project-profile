@@ -210,6 +210,9 @@ export function detectPython(b: Builder): void {
   else if (b.hasFile("manage.py")) b.command("test", `${prefix}python manage.py test`, "Django");
   else if (b.hasFile("tox.ini")) b.command("test", "tox", "tox.ini");
   else if (testsDir) b.command("test", `${prefix}python -m unittest discover ${testsDir}`, "unittest");
+  if (hasPytest) b.command("test:one", `${prefix}pytest <file>::<test_name>`, "pytest");
+  else if (b.hasFile("manage.py")) b.command("test:one", `${prefix}python manage.py test <app.tests.TestClass.test_method>`, "Django");
+  else if (testsDir) b.command("test:one", `${prefix}python -m unittest <module.TestClass.test_method>`, "unittest");
   if (b.hasFile("manage.py")) b.command("dev", `${prefix}python manage.py runserver`, "Django");
   const scripts = tomlSections(pyproject).get("tool.pdm.scripts") ?? tomlSections(pyproject).get("tool.poe.tasks");
   if (scripts) for (const k of Object.keys(scripts)) b.note(`task: ${k}`);

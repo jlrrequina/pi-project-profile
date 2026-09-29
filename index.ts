@@ -30,6 +30,7 @@ import { buildPlan, TIER_ORDER, type PlannedCheck } from "./verify/plan.ts";
 import { logDir, pruneLogs } from "./verify/run.ts";
 import { collectFindings, formatFinding, headContent, isWeakening, mustFix, readForDiff, SKIP, type Before, type Finding } from "./verify/findings.ts";
 import { fixHint } from "./verify/hints.ts";
+import { doctorReport } from "./profile/doctor.ts";
 import { discoverRules, generatedPatterns, generatedReason, matchingRules, nestedInstructionFiles, readInstruction, renderInjection, type InjectionPart, type ScopedRule } from "./profile/scoped.ts";
 import { readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
@@ -872,9 +873,9 @@ export default function projectProfile(pi: ExtensionAPI) {
   });
 
   // ------------------------------------------------------------------ /profile
-  const SUBS = ["show", "refresh", "set", "note", "notes", "tests", "build", "verify", "forget", "config", "path", "help"];
+  const SUBS = ["show", "refresh", "doctor", "set", "note", "notes", "tests", "build", "verify", "forget", "config", "path", "help"];
   pi.registerCommand("profile", {
-    description: "Project profile: /profile [show|refresh|set <key> <cmd|->|note <text>|notes clear|tests allow|deny|ask|build allow|deny|ask|verify on|off|forget|config|path]",
+    description: "Project profile: /profile [show|refresh|doctor|set <key> <cmd|->|note <text>|notes clear|tests allow|deny|ask|build allow|deny|ask|verify on|off|forget|config|path]",
     getArgumentCompletions: (prefix) => SUBS.filter((x) => x.startsWith(prefix)).map((x) => ({ value: x, label: x })),
     handler: async (args, ctx) => {
       if (!s) return;
@@ -893,6 +894,12 @@ export default function projectProfile(pi: ExtensionAPI) {
           const stored = requireStored();
           if (!stored) return;
           showReport(renderReport(stored, st.config, { verifyEnabled: verifyEnabled(), cachePath: profilePath(dir, st.root), brokenChecks: st.broken, lastVerdict: st.lastVerdict }));
+          return;
+        }
+        case "doctor": {
+          const stored = requireStored();
+          if (!stored) return;
+          showReport(doctorReport(stored, effectiveChecks(stored), st.broken));
           return;
         }
         case "refresh": {
@@ -1009,7 +1016,7 @@ export default function projectProfile(pi: ExtensionAPI) {
           return;
         }
         default:
-          notify(ctx, "usage: /profile [show|refresh|set <key> <cmd|->|note <text>|notes clear|tests allow|deny|ask|build allow|deny|ask|verify on|off|forget|config|path]", "info");
+          notify(ctx, "usage: /profile [show|refresh|doctor|set <key> <cmd|->|note <text>|notes clear|tests allow|deny|ask|build allow|deny|ask|verify on|off|forget|config|path]", "info");
       }
     },
   });

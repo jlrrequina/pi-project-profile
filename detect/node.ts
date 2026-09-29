@@ -284,7 +284,7 @@ export function detectNode(b: Builder): void {
   if (!b.commands["dev"] && scripts["start"]) b.command("run", run("start"), "package.json scripts.start");
   // Only scripts that rewrite files count as the format/fix commands (used for fix hints); `--check` scripts are checks.
   const writes = (body: string) => !/--check\b|--list-different\b|--verify-no-changes\b|(^|\s)-l(\s|$)/.test(body) && !WATCH_RE.test(body);
-  pick("format", ["format", "fmt", "prettier", "format:write", "format:fix"], undefined, writes);
+  pick("format", ["format:fix", "format:write", "format", "fmt", "prettier"], undefined, writes);
   pick("fix", ["lint:fix", "fix", "lint-fix", "fix:lint", "lint:write", "check:fix", "fix:all"], /--fix|--write|--apply|\bfix\b/, writes);
   pick("docs", ["docs", "docs:dev", "storybook"]);
   pick("migrate", ["migrate", "db:migrate", "prisma:migrate"]);
@@ -371,6 +371,18 @@ export function detectNode(b: Builder): void {
     b.check({ id: "node:test", tier: "test", label: "test", cmd: r.cmd, argv: r.argv, source: "jest", requires: r.requires, tool: "jest", env: { CI: "true" }, scope: scopeOf("jest") });
   }
   if (testScript && !testCheck) b.note(`scripts.${testScript} runs in watch mode; not used as a check`);
+  // One test at a time: faster iteration than the whole suite.
+  const pmx = pm === "npm" ? "npx" : pm === "yarn" ? "yarn" : `${pm} exec`;
+  const scriptsUse = (re: RegExp) => Object.values(scripts).some((body) => re.test(body));
+  const one =
+    runner === "vitest" ? `${pmx} vitest run <file> -t "<name>"`
+    : runner === "jest" ? `${pmx} jest <file> -t "<name>"`
+    : runner === "mocha" ? `${pmx} mocha <file> -g "<name>"`
+    : runner === "ava" ? `${pmx} ava <file> --match "<name>"`
+    : pm === "bun" && scriptsUse(/\bbun test\b/) ? `bun test <file> -t "<name>"`
+    : scriptsUse(/\bnode --test\b/) ? `node --test --test-name-pattern="<name>" <file>`
+    : undefined;
+  if (one && (testCheck || runner)) b.command("test:one", one, runner ?? "test script");
 
   // build tier (confirm-once)
   const buildCheck = find(["build"], undefined, notWatch);

@@ -9,6 +9,7 @@ import type { InstructionFile, Tier } from "../types.ts";
 import type { Builder } from "./context.ts";
 import { composeServices } from "./context.ts";
 import { generatedPatterns } from "../profile/scoped.ts";
+import { testConventions } from "./tests.ts";
 
 // ---------------------------------------------------------------- Task runners
 const TARGET_KEYS: Array<[RegExp, string]> = [
@@ -293,7 +294,7 @@ export function detectInstructions(b: Builder, opts: { inline: boolean; maxFile:
 }
 
 // ---------------------------------------------------------------- Repo shape
-export function detectRepoShape(b: Builder, gitRoot: string | undefined): { layout: string[]; remote?: string; trackedFiles?: number; name?: string; extCounts: Record<string, number> } {
+export function detectRepoShape(b: Builder, gitRoot: string | undefined): { layout: string[]; remote?: string; trackedFiles?: number; name?: string; extCounts: Record<string, number>; tests?: string } {
   const extCounts: Record<string, number> = {};
   const layout: string[] = [];
   const dirs = listDirs(b.root).filter((d) => !d.startsWith(".") && !b.opts.ignoreDirs.includes(d));
@@ -306,6 +307,7 @@ export function detectRepoShape(b: Builder, gitRoot: string | undefined): { layo
   if (dirs.length > 14) layout.push(`… +${dirs.length - 14} dirs`);
   let remote: string | undefined;
   let trackedFiles: number | undefined;
+  let tests: string | undefined;
   if (gitRoot) {
     const cfg = readText(join(gitRoot, ".git", "config"), 64_000);
     if (cfg) {
@@ -320,6 +322,7 @@ export function detectRepoShape(b: Builder, gitRoot: string | undefined): { layo
     if (ls.status === 0) {
       const files = ls.stdout.split("\0");
       trackedFiles = files.length - 1;
+      tests = testConventions(files);
       for (const f of files) {
         const dot = f.lastIndexOf(".");
         const slash = f.lastIndexOf("/");
@@ -331,7 +334,7 @@ export function detectRepoShape(b: Builder, gitRoot: string | undefined): { layo
     }
   }
   const name = remote?.split("/").slice(-1)[0] ?? undefined;
-  return { layout, remote, trackedFiles, name, extCounts };
+  return { layout, remote, trackedFiles, name, extCounts, tests };
 }
 
 function normalizeRemote(url: string): string {

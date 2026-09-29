@@ -57,6 +57,7 @@ export function detectGo(b: Builder): void {
   b.command("lint", b.conventions.includes("golangci-lint") ? "golangci-lint run" : "gofmt -l . && go vet ./...", "go");
   b.command("format", "gofmt -w .", "go");
   b.command("test", "go test ./...", "go");
+  b.command("test:one", "go test ./<pkg> -run '^<TestName>$'", "go");
   b.command("build", "go build ./...", "go");
   if (b.hasFile("main.go")) b.command("run", "go run .", "go");
 

@@ -80,6 +80,7 @@ export function detectRust(b: Builder): void {
   b.command("lint", "cargo clippy --all-targets", "cargo");
   b.command("format", "cargo fmt", "cargo");
   b.command("test", "cargo test", "cargo");
+  b.command("test:one", isWorkspace ? "cargo test -p <crate> <test_name>" : "cargo test <test_name>", "cargo");
   b.command("build", "cargo build", "cargo");
   if (pkg && !isWorkspace) b.command("run", "cargo run", "cargo");
   if (!cargoBin) b.note("cargo not on PATH — Rust checks skipped");

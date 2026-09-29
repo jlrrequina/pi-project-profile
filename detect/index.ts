@@ -11,7 +11,7 @@ import { detectCI, detectConventions, detectInstructions, detectRepoShape, detec
 import { detectRust } from "./rust.ts";
 
 /** Bump when detector output changes shape/semantics so caches refresh. */
-export const DETECTOR_VERSION = 10;
+export const DETECTOR_VERSION = 11;
 
 const LANG_EXTS: Record<string, string[]> = { TypeScript: [".ts", ".tsx", ".mts", ".cts"], JavaScript: [".js", ".jsx", ".mjs", ".cjs"], Python: [".py"], Rust: [".rs"], Go: [".go"], Ruby: [".rb"], Java: [".java"], Kotlin: [".kt", ".kts"], Scala: [".scala"], Swift: [".swift"], PHP: [".php"], Elixir: [".ex", ".exs"], Dart: [".dart"], C: [".c", ".h"], "C++": [".cc", ".cpp", ".cxx", ".hpp"], Zig: [".zig"], Haskell: [".hs"], OCaml: [".ml", ".mli"], "C#": [".cs"], "F#": [".fs"], Lua: [".lua"], Perl: [".pl", ".pm"], Erlang: [".erl"], Gleam: [".gleam"], Nim: [".nim"], Julia: [".jl"], R: [".r"], "HCL (Terraform)": [".tf"], Shell: [".sh", ".bash"], Markdown: [".md"] };
 
@@ -196,6 +196,7 @@ export function detectProject(root: string, config: ProfileConfig, gitRoot?: str
     instructionFiles,
     ci,
     layout: shape.layout,
+    tests: shape.tests,
   });
   if (profile.languages.length === 0) {
     // Guess language from file extensions at the top level

@@ -116,6 +116,8 @@ export interface DetectedProfile {
   services: string[];
   notes: string[];
   monorepo?: { kind: string; packages?: number; tool?: string };
+  /** Test naming/location conventions from the tracked files. */
+  tests?: string;
   /** `.gitattributes` linguist-generated patterns (hand edits are overwritten). */
   generated?: string[];
   /** file → "mtime:size" for cache invalidation. */
