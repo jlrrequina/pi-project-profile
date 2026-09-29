@@ -58,18 +58,36 @@ const NOISE_PATTERNS: RegExp[] = [
 export interface Pruned {
   lines: string[];
   totalLines: number;
+  /** Diagnostic lines recognised in the whole output (including dropped ones). */
   diagnosticCount: number;
+  /** Diagnostic lines left out because the caller marked them (pre-existing failures). */
+  dropped: number;
   /** First file paths mentioned in diagnostics (for the failure signature). */
   files: string[];
 }
 
-export function pruneOutput(text: string, maxLines = 40): Pruned {
-  const all = text.replace(/\r\n?/g, "\n").split("\n").map((l) => l.replace(/\s+$/, ""));
+/** Split tool output into lines exactly as pruning does (shared with the baseline logic). */
+export function splitLines(text: string): string[] {
+  return text.replace(/\r\n?/g, "\n").split("\n").map((l) => l.replace(/\s+$/, ""));
+}
+
+/** A line that carries a diagnostic (file:line, error/FAIL markers) and is not progress noise. */
+export function isDiagnosticLine(line: string): boolean {
+  return DIAG_PATTERNS.some((re) => re.test(line)) && !NOISE_PATTERNS.some((re) => re.test(line));
+}
+
+/**
+ * @param drop indices (into splitLines(text)) of diagnostic lines to leave out, with their
+ *             context lines — used to hide failures that existed before the agent's change.
+ */
+export function pruneOutput(text: string, maxLines = 40, opts: { drop?: Set<number> } = {}): Pruned {
+  const all = splitLines(text);
   const totalLines = all.filter((l) => l.trim() !== "").length;
-  const isDiag = (l: string) => DIAG_PATTERNS.some((re) => re.test(l));
   const isNoise = (l: string) => NOISE_PATTERNS.some((re) => re.test(l));
-  const diagIdx: number[] = [];
-  for (let i = 0; i < all.length; i++) if (isDiag(all[i]!) && !isNoise(all[i]!)) diagIdx.push(i);
+  const allDiag: number[] = [];
+  for (let i = 0; i < all.length; i++) if (isDiagnosticLine(all[i]!)) allDiag.push(i);
+  const drop = opts.drop ?? new Set<number>();
+  const diagIdx = allDiag.filter((i) => !drop.has(i));
   const files = new Set<string>();
   for (const i of diagIdx.slice(0, 50)) {
     const m = all[i]!.match(/([^\s:()'"]+\.[A-Za-z0-9]{1,10})(?=[:(]\d)/);
@@ -106,6 +124,9 @@ export function pruneOutput(text: string, maxLines = 40): Pruned {
     // Always include a summary line if present near the end.
     const summary = all.slice(-15).find((l) => /(Found \d+ errors?|\d+ (failed|passed|errors?|problems?)|Tests?:\s|could not compile|FAILED|✖)/i.test(l) && !picked.includes(l));
     if (summary && picked.length < maxLines + 2) picked.push(summary);
+  } else if (allDiag.length > 0) {
+    // Every diagnostic was dropped (all pre-existing): nothing new to show.
+    picked = [];
   } else {
     // No diagnostics recognised: first 8 non-noise lines + tail.
     const nonNoise = all.filter((l) => !isNoise(l));
@@ -114,5 +135,5 @@ export function pruneOutput(text: string, maxLines = 40): Pruned {
     picked = head.length + tail.length > nonNoise.length ? nonNoise.slice(0, maxLines) : [...head, "…", ...tail];
   }
   picked = picked.map((l) => (l.length > 400 ? l.slice(0, 397) + "…" : l));
-  return { lines: picked, totalLines, diagnosticCount: diagIdx.length, files: Array.from(files).slice(0, 12) };
+  return { lines: picked, totalLines, diagnosticCount: allDiag.length, dropped: allDiag.length - diagIdx.length, files: Array.from(files).slice(0, 12) };
 }

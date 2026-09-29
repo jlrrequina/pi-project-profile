@@ -73,6 +73,12 @@ interface SessionState {
   renderedKey?: string;
   lastVerdict?: string;
   supersededIds: Set<string>;
+  /** Last full-run diagnostics per check (id@cwd): the source of the pre-existing-failure baseline. */
+  lastDiag: Map<string, Map<string, number>>;
+  /** lastDiag frozen when the current prompt started. */
+  promptBaseline: Map<string, Map<string, number>>;
+  /** Checks whose pre-existing failures were already reported to the user this session. */
+  notifiedKnown: Set<string>;
   mode: string;
   hasUI: boolean;
 }
@@ -121,9 +127,10 @@ export default function projectProfile(pi: ExtensionAPI) {
     }
   }
 
-  function makeHooks(ctx: ExtensionContext, signal: AbortSignal, opts: { interactive: boolean }): GateHooks {
+  function makeHooks(ctx: ExtensionContext, signal: AbortSignal, opts: { interactive: boolean; baseline?: boolean }): GateHooks {
     return {
       broken: s!.broken,
+      baseline: opts.baseline === false ? undefined : (check) => s!.promptBaseline.get(check.id + "@" + check.cwd),
       signal,
       progress: (t) => setStatus(ctx, `⏳ ${t}`),
       permission: async (tier, planned) => {
@@ -181,6 +188,32 @@ export default function projectProfile(pi: ExtensionAPI) {
     }
   }
 
+  /** Remember full-run diagnostics of project-wide checks (scoped runs only cover part of the output). */
+  function recordDiag(verdict: GateVerdict) {
+    for (const r of verdict.runs) {
+      if (!r.diag || r.scoped) continue;
+      if (r.status === "pass" || r.status === "fail" || r.status === "preexisting") s!.lastDiag.set(r.check.id + "@" + r.check.cwd, r.diag);
+    }
+  }
+
+  function whereOf(cwd: string): string {
+    return cwd === s!.root ? "" : ` in ${displayPath(s!.root, cwd)}`;
+  }
+
+  /** Failures that pre-date the task: the user hears about them once per session; the agent gets a one-line note, never a repair round. */
+  function knownNote(ctx: ExtensionContext, verdict: GateVerdict): SessionBoundaryDraft | undefined {
+    const known = verdict.runs.filter((r) => r.status === "preexisting");
+    if (known.length === 0) return undefined;
+    const parts = known.map((r) => `${r.check.label}${whereOf(r.check.cwd)} (${r.preexisting} known)`);
+    for (const r of known) {
+      const key = r.check.id + "@" + r.check.cwd;
+      if (s!.notifiedKnown.has(key)) continue;
+      s!.notifiedKnown.add(key);
+      notify(ctx, `verify: ${r.check.label}${whereOf(r.check.cwd)} still reports ${r.preexisting} failure${r.preexisting === 1 ? "" : "s"} that existed before this task — not sent to the agent`, "info");
+    }
+    return { type: "custom_message", customType: VERIFY_MSG, content: `[verification] no new failures from this task. Already failing before it and left alone: ${parts.join(", ")}. Mention it if you report on verification; do not try to fix it unless the user asks.`, display: true, details: { seq: s!.prompt.seq, kind: "info", headline: `no new failures · known: ${parts.join(", ")}` } };
+  }
+
   function failureMessage(verdict: GateVerdict, round: number, max: number): string {
     const st = s!;
     const failing = verdict.runs.filter((r) => r.status === "fail");
@@ -195,6 +228,7 @@ export default function projectProfile(pi: ExtensionAPI) {
       const shown = r.summary.length;
       if (r.totalLines > shown) lines.push(`(${r.totalLines - shown} more lines${r.logPath ? `; full log: ${r.logPath}` : ""})`);
       else if (r.logPath) lines.push(`(full log: ${r.logPath})`);
+      if (r.preexisting) lines.push(`(${r.preexisting} other diagnostic line${r.preexisting === 1 ? "" : "s"} of this check already failed before this task and ${r.preexisting === 1 ? "is" : "are"} hidden — leave ${r.preexisting === 1 ? "it" : "them"} alone unless asked.)`);
     }
     if (passed.length) lines.push(`Passed: ${uniq(passed).join(", ")}.`);
     const changed = verdict.changedFiles.map((f) => displayPath(st.root, f));
@@ -253,7 +287,8 @@ export default function projectProfile(pi: ExtensionAPI) {
     const labels = (status: string) => uniq(v.runs.filter((r) => r.status === status && r.check.tier !== "syntax").map((r) => r.check.label));
     const secs = `${(v.durationMs / 1000).toFixed(1)}s`;
     if (v.status === "red") return `✗ ${labels("fail").join("·")}`;
-    if (v.status === "green") return `✓ ${labels("pass").join("·") || "syntax"} ${secs}`;
+    const known = v.runs.reduce((n, r) => n + (r.status === "preexisting" ? (r.preexisting ?? 0) : 0), 0);
+    if (v.status === "green") return `✓ ${uniq([...labels("pass"), ...labels("preexisting")]).join("·") || "syntax"} ${secs}${known ? ` (${known} known)` : ""}`;
     if (v.status === "env") return `⚠ ${labels("env").join("·")} unavailable`;
     return "– nothing to verify";
   }
@@ -303,6 +338,9 @@ export default function projectProfile(pi: ExtensionAPI) {
       gateRunning: false,
       abort: new AbortController(),
       supersededIds: new Set(),
+      lastDiag: new Map(),
+      promptBaseline: new Map(),
+      notifiedKnown: new Set(),
       mode: ctx.mode,
       hasUI: ctx.hasUI,
     };
@@ -341,6 +379,8 @@ export default function projectProfile(pi: ExtensionAPI) {
     s.prompt = { seq: s.prompt.seq + 1, repairRound: 0, pendingRepair: false, finalized: false, mustRun: [] };
     s.turnFiles.clear();
     s.turnBash = false;
+    // Failures recorded before this prompt are pre-existing for the whole prompt.
+    s.promptBaseline = new Map(s.lastDiag);
     if (verifyEnabled()) await snapshotStart(s.tracker);
     if (!s.config.profile.inject || !s.stored) return;
     const loaded = (event.systemPromptOptions.contextFiles ?? []).map((f) => f.path);
@@ -409,8 +449,9 @@ export default function projectProfile(pi: ExtensionAPI) {
       const hooks = makeHooks(ctx, st.abort.signal, { interactive: true });
       setStatus(ctx, "⏳ verifying…");
       const verdict = await runGate(plan, st.config, hooks);
+      recordDiag(verdict);
       st.lastVerdict = verdictLine(verdict);
-      debug("verdict", { seq: st.prompt.seq, status: verdict.status, ms: verdict.durationMs, runs: verdict.runs.map((r) => ({ id: r.check.id, status: r.status, code: r.exitCode, ms: r.durationMs, reason: r.reason, lines: r.summary.length })) });
+      debug("verdict", { seq: st.prompt.seq, status: verdict.status, ms: verdict.durationMs, runs: verdict.runs.map((r) => ({ id: r.check.id, status: r.status, code: r.exitCode, ms: r.durationMs, reason: r.reason, lines: r.summary.length, known: r.preexisting })) });
       reportEnvFailures(ctx, verdict);
       const max = st.config.verify.maxRepairRounds;
       if (verdict.status === "green") {
@@ -420,6 +461,8 @@ export default function projectProfile(pi: ExtensionAPI) {
           notify(ctx, `verify: checks pass after ${st.prompt.repairRound} repair round${st.prompt.repairRound === 1 ? "" : "s"} (${describeRuns(verdict.runs)})`, "info");
           drafts.push({ type: "custom_message", customType: VERIFY_MSG, content: `[verification] ✓ all checks pass now: ${describeRuns(verdict.runs)}.`, display: true, details: { seq: st.prompt.seq, kind: "pass", headline: `passed — ${describeRuns(verdict.runs)}` } });
         }
+        const known = knownNote(ctx, verdict);
+        if (known) drafts.push(known);
         st.prompt.pendingRepair = false;
         st.prompt.mustRun = [];
         // Boundary results replace the draft chain: always carry earlier handlers' entries.
@@ -505,6 +548,7 @@ export default function projectProfile(pi: ExtensionAPI) {
       const hooks = makeHooks(ctx, st.abort.signal, { interactive: false });
       setStatus(ctx, "⏳ fast check…");
       const verdict = await runGate(plan, st.config, hooks);
+      recordDiag(verdict);
       debug("perturn", { seq: st.prompt.seq, turn: event.turnIndex, files: Array.from(files).sort(), bash, status: verdict.status, ms: verdict.durationMs, runs: verdict.runs.map((r) => ({ id: r.check.id, status: r.status, code: r.exitCode })) });
       reportEnvFailures(ctx, verdict);
       if (verdict.status !== "red") {
@@ -526,7 +570,7 @@ export default function projectProfile(pi: ExtensionAPI) {
   });
 
   // ------------------------------------------------------------------ manual verification (command + tool)
-  async function manualVerify(ctx: ExtensionContext, opts: { tiers?: Tier[]; files?: string[]; interactive: boolean }): Promise<GateVerdict | undefined> {
+  async function manualVerify(ctx: ExtensionContext, opts: { tiers?: Tier[]; files?: string[]; interactive: boolean; baseline: boolean }): Promise<GateVerdict | undefined> {
     if (!s || !s.stored) return undefined;
     const st = s;
     if (st.gateRunning) {
@@ -538,10 +582,11 @@ export default function projectProfile(pi: ExtensionAPI) {
       const files = (opts.files ?? []).map((f) => (isAbsolute(f) ? f : join(ctx.cwd, f))).map(realpath);
       const plan = await buildGatePlan(files, { unscoped: files.length === 0 });
       if (opts.tiers) for (const t of TIER_ORDER) if (!opts.tiers.includes(t)) plan.byTier.set(t, []);
-      const hooks = makeHooks(ctx, st.abort.signal, { interactive: opts.interactive });
+      const hooks = makeHooks(ctx, st.abort.signal, { interactive: opts.interactive, baseline: opts.baseline });
       hooks.stopOnRed = false;
       setStatus(ctx, "⏳ verifying…");
       const verdict = await runGate(plan, st.config, hooks);
+      recordDiag(verdict);
       st.lastVerdict = verdictLine(verdict);
       reportEnvFailures(ctx, verdict);
       setStatus(ctx, statusText(verdict));
@@ -554,7 +599,7 @@ export default function projectProfile(pi: ExtensionAPI) {
   function verdictReport(verdict: GateVerdict): string {
     const out: string[] = [];
     for (const r of verdict.runs) {
-      const icon = r.status === "pass" ? "✓" : r.status === "fail" ? "✗" : r.status === "env" ? "⚠" : "–";
+      const icon = r.status === "pass" ? "✓" : r.status === "fail" ? "✗" : r.status === "env" ? "⚠" : r.status === "preexisting" ? "≈" : "–";
       out.push(`${icon} **${r.check.label}** \`${r.check.cmd.replace(" <files>", "")}\` — ${r.status}${r.reason ? ` (${r.reason})` : ""} · ${(r.durationMs / 1000).toFixed(1)}s${r.check.cwd !== s!.root ? ` · ${displayPath(s!.root, r.check.cwd)}` : ""}`);
       if (r.summary.length) out.push("```\n" + r.summary.join("\n") + "\n```" + (r.logPath ? `\n(full log: ${r.logPath})` : ""));
     }
@@ -581,7 +626,7 @@ export default function projectProfile(pi: ExtensionAPI) {
         tiers = undefined;
       } else if (!parts[0]) tiers = ["syntax", "fast", "lint"];
       const files = parts;
-      const verdict = await manualVerify(ctx, { tiers, files, interactive: true });
+      const verdict = await manualVerify(ctx, { tiers, files, interactive: true, baseline: false });
       if (!verdict) return;
       const md = `## /verify — ${verdict.status} (${(verdict.durationMs / 1000).toFixed(1)}s)\n\n${verdictReport(verdict)}`;
       showReport(md);
@@ -604,7 +649,7 @@ export default function projectProfile(pi: ExtensionAPI) {
     }),
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const tiers: Tier[] | undefined = params.tier === "all" ? undefined : params.tier ? ["syntax", params.tier] : ["syntax", "fast", "lint"];
-      const verdict = await manualVerify(ctx, { tiers, files: params.files, interactive: true });
+      const verdict = await manualVerify(ctx, { tiers, files: params.files, interactive: true, baseline: true });
       if (!verdict) return { content: [{ type: "text", text: "verification unavailable (no profile or a run is already in progress)" }], details: undefined };
       const text = `verification: ${verdict.status} (${(verdict.durationMs / 1000).toFixed(1)}s)\n${verdictReport(verdict).replace(/\*\*/g, "")}`;
       return { content: [{ type: "text", text }], details: { status: verdict.status, runs: verdict.runs.map((r) => ({ id: r.check.id, status: r.status, exitCode: r.exitCode, durationMs: r.durationMs })) } };

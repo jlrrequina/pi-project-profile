@@ -157,6 +157,8 @@ export interface ProfileConfig {
      * multi-file edits are legitimately red half-way through.
      */
     perTurn: boolean;
+    /** Checks run concurrently within the syntax/fast/lint tiers (0 = auto: half the cores, max 4). Tests and builds always run one at a time. */
+    concurrency: number;
   };
   profile: {
     inject: boolean;
@@ -181,6 +183,7 @@ export const DEFAULT_CONFIG: ProfileConfig = {
     maxOutputLines: 40,
     summarizeOnGiveUp: true,
     perTurn: false,
+    concurrency: 0,
   },
   profile: {
     inject: true,
@@ -227,7 +230,8 @@ export const DEFAULT_CONFIG: ProfileConfig = {
 /** Result of running one check. */
 export interface CheckRun {
   check: Check;
-  status: "pass" | "fail" | "env" | "skipped";
+  /** preexisting = failed, but only with failures recorded before this task (not sent to the agent). */
+  status: "pass" | "fail" | "env" | "skipped" | "preexisting";
   exitCode: number | null;
   durationMs: number;
   /** Pruned, model-facing lines. */
@@ -238,6 +242,12 @@ export interface CheckRun {
   logPath?: string;
   reason?: string;
   timedOut?: boolean;
+  /** Diagnostics hidden because they existed before this task. */
+  preexisting?: number;
+  /** Normalised diagnostic multiset of this run (baseline bookkeeping; project-wide checks only). */
+  diag?: Map<string, number>;
+  /** The run was narrowed to the changed files (not a full-baseline run). */
+  scoped?: boolean;
 }
 
 export interface GateVerdict {

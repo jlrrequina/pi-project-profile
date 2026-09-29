@@ -9,15 +9,16 @@ import { detectProject, findProjectRoot, nearestProjectDir } from "../detect/ind
 import { executableCandidates, expandDirGlob, findNodeBin, stripJsonComments } from "../fs-utils.ts";
 import { effectiveChecks, renderPromptSection, tierAllowed } from "../profile/render.ts";
 import { emptyUserData, isStale, loadOrDetect, updateUser } from "../profile/store.ts";
-import { DEFAULT_CONFIG, type StoredProfile } from "../types.ts";
+import { DEFAULT_CONFIG, type Check, type StoredProfile } from "../types.ts";
 import { classifyFailure } from "../verify/classify.ts";
-import { buildPlan, isDocOnly } from "../verify/plan.ts";
+import { buildPlan, isDocOnly, TIER_ORDER, type Plan } from "../verify/plan.ts";
 import { pruneOutput } from "../verify/prune.ts";
 import { resolveArgv, resolvePython } from "../verify/resolve.ts";
 import { platformArgv, runCommand } from "../verify/run.ts";
 import { scopeCheck, scopeFromScript } from "../verify/scope.ts";
 import { collectChanges, newTracker, peekChanges, snapshotStart, toolPath } from "../verify/changes.ts";
-import { runCheck } from "../verify/gate.ts";
+import { defaultConcurrency, runCheck, runGate, runPool } from "../verify/gate.ts";
+import { analyzeDiagnostics, normalizeDiag, splitByBaseline } from "../verify/baseline.ts";
 import { looksLikeDirective } from "../detect/repo.ts";
 import { NODE_BIN_PREFIX, PY_PREFIX } from "../types.ts";
 
@@ -451,6 +452,92 @@ test("windows: PATHEXT lookup, .cmd shims in node_modules/.bin, venv Scripts/, s
   } finally {
     Object.defineProperty(process, "platform", prevPlatform);
   }
+});
+
+// ---------------------------------------------------------------- pre-existing failures + parallel gate
+test("baseline keys ignore locations/durations but keep error codes; counts make a second instance new", () => {
+  assert.equal(normalizeDiag("src/a.ts(12,5): error TS2322: Type 'string' is not assignable to type 'number'."), "src/a.ts(N,N): error TS2322: Type 'string' is not assignable to type 'number'.");
+  assert.equal(normalizeDiag("/repo/pkg/src/b.py:3: error: Name 'x' is not defined  [name-defined]", "/repo/pkg"), "src/b.py:N: error: Name 'x' is not defined [name-defined]");
+  assert.equal(normalizeDiag("error[E0308]: mismatched types"), "error[E0308]: mismatched types");
+  const before = "src/a.ts(1,1): error TS2322: x\nsrc/b.ts(2,2): error TS2304: Cannot find name 'foo'.\nFound 2 errors in 2 files.\n";
+  const after = "src/a.ts(9,1): error TS2322: x\nsrc/b.ts(7,2): error TS2304: Cannot find name 'foo'.\nsrc/b.ts(8,2): error TS2304: Cannot find name 'foo'.\nsrc/c.ts(1,1): error TS7006: Parameter 'i' implicitly has an 'any' type.\nFound 4 errors in 3 files.\n";
+  const base = analyzeDiagnostics(before).keys;
+  const split = splitByBaseline(analyzeDiagnostics(after), base);
+  assert.deepEqual([...split.newKeys.keys()].sort(), ["src/b.ts(N,N): error TS2304: Cannot find name 'foo'.", "src/c.ts(N,N): error TS7006: Parameter 'i' implicitly has an 'any' type."]);
+  // known: a.ts, the first b.ts TS2304 and the (normalised) summary line; new: the second TS2304 and c.ts
+  assert.deepEqual([...split.preexisting].sort(), [0, 1, 4]);
+  const pruned = pruneOutput(after, 40, { drop: split.preexisting });
+  assert.ok(pruned.lines.some((l) => l.includes("src/c.ts")) && !pruned.lines.some((l) => l.startsWith("src/a.ts")));
+  assert.equal(pruned.dropped, 3);
+  // unrecognised output: identical tail = known, anything else = new
+  const odd = analyzeDiagnostics("something broke\nexit status 1\n");
+  assert.equal(splitByBaseline(odd, odd.keys).newKeys.size, 0);
+  assert.equal(splitByBaseline(analyzeDiagnostics("something else broke\n"), odd.keys).newKeys.size, 1);
+  // a passing baseline (empty) makes every failure new
+  assert.equal(splitByBaseline(analyzeDiagnostics(before), new Map()).newKeys.size, 3);
+});
+
+test("gate: failures that were already there are 'preexisting' (green, not sent back); new ones stay red and alone in the summary", async () => {
+  const root = tmp();
+  const script = (lines: string[]) => nodeArgv(`console.log(${JSON.stringify(lines.join("\n"))}); process.exit(2)`);
+  const known = ["src/a.ts(1,1): error TS2322: Type 'string' is not assignable to type 'number'.", "Found 1 error in src/a.ts:1"];
+  const check = (argv: string[], extra: Partial<Check> = {}): Check => ({ id: "node:typecheck", tier: "fast", label: "typecheck", cmd: "tsc", argv, cwd: root, source: "t", requires: {}, tool: "tsc", ...extra });
+  const planOf = (c: Check): Plan => ({ byTier: new Map(TIER_ORDER.map((t) => [t, t === c.tier ? [{ check: c, files: [] }] : []])), relevantFiles: [], ignoredFiles: [] });
+  const baseRun = await runGate(planOf(check(script(known))), config, { permission: async () => "allow", broken: new Map() });
+  assert.equal(baseRun.status, "red");
+  const baseline = baseRun.runs[0]!.diag!;
+  const hooks = { permission: async () => "allow" as const, broken: new Map<string, string>(), baseline: () => baseline };
+  const same = await runGate(planOf(check(script(["src/a.ts(40,3): error TS2322: Type 'string' is not assignable to type 'number'.", "Found 1 error in src/a.ts:40"]))), config, hooks);
+  assert.equal(same.status, "green");
+  assert.equal(same.runs[0]!.status, "preexisting");
+  assert.ok(same.runs[0]!.preexisting! >= 1);
+  const worse = await runGate(planOf(check(script([...known, "src/b.ts(2,2): error TS2304: Cannot find name 'foo'."]))), config, hooks);
+  assert.equal(worse.status, "red");
+  assert.ok(worse.runs[0]!.summary.some((l) => l.includes("src/b.ts")));
+  assert.ok(!worse.runs[0]!.summary.some((l) => l.startsWith("src/a.ts")));
+  assert.ok(worse.runs[0]!.preexisting! >= 1);
+  // per-file checks (appendFiles) never use a baseline: their file set differs between runs
+  const perFile = await runGate(planOf(check(script(known), { id: "node:lint", tier: "lint", label: "lint", appendFiles: true, unscopedArgs: ["."] })), config, hooks);
+  assert.equal(perFile.status, "red");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("runPool: bounded concurrency, lanes run serially, results keep input order", async () => {
+  const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+  let inFlight = 0;
+  let peak = 0;
+  const started = Date.now();
+  const out = await runPool([1, 2, 3, 4], 2, () => undefined, async (n) => {
+    inFlight++;
+    peak = Math.max(peak, inFlight);
+    await sleep(120);
+    inFlight--;
+    return n * 10;
+  });
+  assert.deepEqual(out, [10, 20, 30, 40]);
+  assert.equal(peak, 2);
+  assert.ok(Date.now() - started < 450);
+  const order: string[] = [];
+  await runPool(["cargo:a", "tsc", "cargo:b"], 4, (x) => (x.startsWith("cargo") ? "cargo" : undefined), async (x) => {
+    order.push(`start ${x}`);
+    await sleep(60);
+    order.push(`end ${x}`);
+    return x;
+  });
+  assert.ok(order.indexOf("end cargo:a") < order.indexOf("start cargo:b"));
+  assert.ok(order.indexOf("start tsc") < order.indexOf("end cargo:a"));
+  assert.ok(defaultConcurrency(3) === 3 && defaultConcurrency(0) >= 1 && defaultConcurrency(0) <= 4);
+});
+
+test("gate: read-only checks in one tier run in parallel; the verdict keeps plan order", async () => {
+  const root = tmp();
+  const mk = (id: string): Check => ({ id, tier: "lint", label: id, cmd: id, argv: nodeArgv("setTimeout(() => process.exit(0), 400)"), cwd: root, source: "t", requires: {}, tool: "generic" });
+  const plan: Plan = { byTier: new Map(TIER_ORDER.map((t) => [t, t === "lint" ? [mk("a"), mk("b"), mk("c")].map((check) => ({ check, files: [] })) : []])), relevantFiles: [], ignoredFiles: [] };
+  const v = await runGate(plan, { ...config, verify: { ...config.verify, concurrency: 3 } }, { permission: async () => "allow", broken: new Map() });
+  assert.deepEqual(v.runs.map((r) => r.check.id), ["a", "b", "c"]);
+  assert.ok(v.runs.every((r) => r.status === "pass"));
+  assert.ok(v.durationMs < 1100, `took ${v.durationMs}ms`);
+  rmSync(root, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------- runner
