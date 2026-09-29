@@ -22,6 +22,7 @@ concurrency:
 
 jobs:
   build:
+    name: assemble the site
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -39,6 +40,7 @@ jobs:
           path: _site
 
   deploy:
+    name: deploy to GitHub Pages
     needs: build
     runs-on: ubuntu-latest
     timeout-minutes: 5

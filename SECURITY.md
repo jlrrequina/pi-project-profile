@@ -19,3 +19,12 @@ gh release verify v<version> -R jlrrequina/pi-project-profile       # GitHub rel
 ```
 
 The tarball attached to each GitHub release is byte-identical to the one on npm.
+
+Each release also carries the tarball's provenance as `lenard9191-pi-project-profile-<version>.tgz.intoto.jsonl`: the Sigstore bundle with the SLSA v1 build-provenance statement, its signature, the signing certificate and the transparency-log entry. It verifies without GitHub's attestation store (only the Sigstore trust root is fetched; pass `--custom-trusted-root` to avoid even that):
+
+```bash
+gh attestation verify lenard9191-pi-project-profile-<version>.tgz \
+  --bundle lenard9191-pi-project-profile-<version>.tgz.intoto.jsonl -R jlrrequina/pi-project-profile
+```
+
+A successful verification shows the signer as `.github/workflows/release.yml@refs/tags/v<version>` in this repository. Releases up to 1.0.1 have no bundle attached; use the first command for them.
