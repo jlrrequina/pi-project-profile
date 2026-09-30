@@ -43,7 +43,7 @@ export class Builder {
   conventions: string[] = [];
   notes: string[] = [];
   services: string[] = [];
-  monorepo?: { kind: string; packages?: number; tool?: string };
+  monorepo?: { kind: string; packages?: number; tool?: string; dirs?: string[] };
   generated: string[] = [];
   /** Tracked-file extension histogram (git ls-files), set before detectors run. */
   extCounts: Record<string, number> = {};

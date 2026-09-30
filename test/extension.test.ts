@@ -3,7 +3,7 @@
  * through π's event sequence with a mock ExtensionAPI and context.
  */
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -25,13 +25,17 @@ async function load() {
   const mod = await import("../index.ts");
   const handlers: Record<string, Handler[]> = {};
   const tools: string[] = [];
+  const impl: Record<string, { execute: (...a: any[]) => Promise<{ content: Array<{ text: string }> }> }> = {};
   const commands: string[] = [];
   mod.default({
     on: (event: string, h: Handler) => {
       (handlers[event] ??= []).push(h);
       return () => {};
     },
-    registerTool: (t: { name: string }) => tools.push(t.name),
+    registerTool: (t: { name: string; execute: (...a: any[]) => any }) => {
+      tools.push(t.name);
+      impl[t.name] = t;
+    },
     registerCommand: (name: string) => commands.push(name),
     registerMessageRenderer: () => {},
     registerEntryRenderer: () => {},
@@ -39,12 +43,13 @@ async function load() {
     sendMessage: () => {},
   } as any);
   const notes: Array<[string, string]> = [];
+  const statuses: string[] = [];
   const ctxFor = (cwd: string) => ({
     cwd,
     mode: "print",
     hasUI: false,
     isProjectTrusted: () => true,
-    ui: { notify: (m: string, t: string) => notes.push([t, m]), setStatus: () => {}, select: async () => undefined },
+    ui: { notify: (m: string, t: string) => notes.push([t, m]), setStatus: (_k: string, t?: string) => statuses.push(t ?? ""), select: async () => undefined },
     sessionManager: { getBranch: () => [] },
   });
   /** Fire an event through every handler, composing tool_result content like π does. */
@@ -61,7 +66,17 @@ async function load() {
     delete process.env.PI_CODING_AGENT_DIR;
     rmSync(agent, { recursive: true, force: true });
   };
-  return { handlers, tools, commands, notes, ctxFor, emit, cleanup };
+  const runChecks = async (ctx: any, params: Record<string, unknown> = {}) => (await impl["run_checks"]!.execute("id", params, undefined, undefined, ctx)).content.map((c) => c.text).join("\n");
+  return { handlers, tools, commands, notes, statuses, ctxFor, emit, cleanup, runChecks };
+}
+
+/** Wait until `pred` holds (background baseline runs finish on their own schedule). */
+async function until(pred: () => boolean, ms = 5000): Promise<void> {
+  const t0 = Date.now();
+  while (!pred()) {
+    if (Date.now() - t0 > ms) throw new Error("timed out waiting");
+    await new Promise((r) => setTimeout(r, 20));
+  }
 }
 
 const prompt = () => ({ systemPromptOptions: { sections: {} as Record<string, string>, contextFiles: [] } });
@@ -92,6 +107,31 @@ test("prompt section is injected and identical across prompts", async () => {
   assert.equal(a.systemPromptOptions.sections["project_profile"], b.systemPromptOptions.sections["project_profile"]);
   x.cleanup();
   rmSync(root, { recursive: true, force: true });
+});
+
+test("a session started in the home directory gets no profile: nothing injected, nothing cached", async () => {
+  const x = await load();
+  const fakeHome = tmp();
+  const prev = { HOME: process.env.HOME, USERPROFILE: process.env.USERPROFILE };
+  process.env.HOME = fakeHome;
+  process.env.USERPROFILE = fakeHome;
+  try {
+    write(fakeHome, "package.json", "{}");
+    mkdirSync(join(fakeHome, "Documents/private"), { recursive: true });
+    const ctx = x.ctxFor(fakeHome);
+    await x.emit("session_start", {}, ctx);
+    const p = prompt();
+    await x.emit("before_agent_start", p, ctx);
+    assert.equal(p.systemPromptOptions.sections["project_profile"], undefined);
+    assert.ok(!existsSync(join(process.env.PI_CODING_AGENT_DIR!, "project-profile", "profiles")) || readdirSync(join(process.env.PI_CODING_AGENT_DIR!, "project-profile", "profiles")).length === 0, "no profile written for ~");
+    assert.equal(await x.emit("agent_before_settle", settle(), ctx), undefined);
+  } finally {
+    process.env.HOME = prev.HOME;
+    if (prev.USERPROFILE === undefined) delete process.env.USERPROFILE;
+    else process.env.USERPROFILE = prev.USERPROFILE;
+    x.cleanup();
+    rmSync(fakeHome, { recursive: true, force: true });
+  }
 });
 
 test("scoped instructions reach the tool result once per session", async () => {
@@ -148,6 +188,60 @@ test("gate: a failing check sends the agent back; on the next prompt the same fa
   rmSync(root, { recursive: true, force: true });
 });
 
+test("baseline: a check that already fails when the agent starts reading is pre-existing in the first prompt", async () => {
+  const x = await load();
+  const root = tmp();
+  const failing = `node -e "console.error('src/old.ts(1,14): error TS2322: Type string is not assignable to type number.'); process.exit(2)"`;
+  write(root, "package.json", JSON.stringify({ name: "demo", scripts: { typecheck: failing } }));
+  write(root, "package-lock.json", "{}");
+  write(root, "tsconfig.json", "{}");
+  write(root, "src/old.ts", "export const old: number = 'x';\n");
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const ctx = x.ctxFor(root);
+  await x.emit("session_start", {}, ctx);
+  await x.emit("before_agent_start", prompt(), ctx);
+  // the agent reads before it writes: the read triggers nothing new here (the root baseline already runs) and the tree is untouched
+  await x.emit("tool_result", { toolName: "read", input: { path: "src/old.ts" }, content: [{ type: "text", text: "" }], isError: false }, ctx);
+  await until(() => x.notes.some(([, m]) => m.includes("already fails on the untouched tree")));
+  assert.ok(x.statuses.some((t) => t.startsWith("\u23f3 baseline typecheck")), x.statuses.join("|"));
+  assert.ok(x.statuses.at(-1)!.includes("auto-check"), "status line restored after the baseline: " + x.statuses.at(-1));
+  const event = { toolName: "write", input: { path: "src/a.ts", content: "export const a = 1;\n" }, content: [{ type: "text", text: "ok" }], isError: false };
+  await x.emit("tool_call", { toolName: "write", input: event.input }, ctx);
+  write(root, "src/a.ts", "export const a = 1;\n");
+  await x.emit("tool_result", event, ctx);
+  const r = await x.emit("agent_before_settle", settle(), ctx);
+  assert.notEqual(r?.continue, true, "no repair round for a failure the agent did not cause");
+  assert.ok(text(r).includes("no new failures") && text(r).includes("typecheck (1 known)"), text(r));
+  assert.equal(x.notes.filter(([, m]) => m.includes("untouched tree") || m.includes("existed before this task")).length, 1, "the user hears about it once");
+  x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("baseline: a write before the baseline finished discards it; the aborted run does not disable the check", async () => {
+  const x = await load();
+  const root = tmp();
+  const slow = `node -e "setTimeout(() => { console.error('src/old.ts(1,14): error TS2322: Type string is not assignable to type number.'); process.exit(2); }, 1500)"`;
+  write(root, "package.json", JSON.stringify({ name: "demo", scripts: { typecheck: slow } }));
+  write(root, "package-lock.json", "{}");
+  write(root, "tsconfig.json", "{}");
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const ctx = x.ctxFor(root);
+  await x.emit("session_start", {}, ctx);
+  await x.emit("before_agent_start", prompt(), ctx);
+  const event = { toolName: "write", input: { path: "src/a.ts", content: "export const a = 1;\n" }, content: [{ type: "text", text: "ok" }], isError: false };
+  await x.emit("tool_call", { toolName: "write", input: event.input }, ctx);
+  write(root, "src/a.ts", "export const a = 1;\n");
+  await x.emit("tool_result", event, ctx);
+  const t0 = Date.now();
+  const r = await x.emit("agent_before_settle", settle(), ctx);
+  assert.equal(r?.continue, true, "without a baseline the failure is sent back");
+  assert.ok(text(r).includes("TS2322") && text(r).includes("repair round 1"), text(r));
+  assert.ok(!x.notes.some(([, m]) => m.includes("disabled this session") || m.includes("untouched tree")), x.notes.map(([, m]) => m).join("|"));
+  assert.ok(Date.now() - t0 < 4000, "the pending baseline was aborted, not awaited on top of the gate");
+  x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("diff guard reports even when no check applies (Markdown-only change with a secret)", async () => {
   const x = await load();
   const root = tmp();
@@ -166,6 +260,32 @@ test("diff guard reports even when no check applies (Markdown-only change with a
   assert.ok(!text(r).includes(key), "the secret value is never repeated");
   assert.ok(x.notes.some(([t, m]) => t === "warning" && m.includes("NOTES.md")));
   x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("run_checks at an umbrella root: one nested project runs; several are named instead of 'no applicable checks'", async () => {
+  const x = await load();
+  const root = tmp();
+  const ok = `node -e "process.exit(0)"`;
+  write(root, "Documentation/notes.md", "# notes\n");
+  write(root, "site/package.json", JSON.stringify({ name: "site", scripts: { typecheck: ok } }));
+  write(root, "site/package-lock.json", "{}");
+  write(root, "site/tsconfig.json", "{}");
+  mkdirSync(join(root, "site/node_modules"), { recursive: true });
+  const ctx = x.ctxFor(root);
+  await x.emit("session_start", {}, ctx);
+  await x.emit("before_agent_start", prompt(), ctx);
+  const one = await x.runChecks(ctx);
+  assert.ok(one.startsWith("verification: green") && one.includes("typecheck") && one.includes("site"), one);
+  // a second nested project makes the choice ambiguous: say what exists instead of running everything
+  write(root, "api/package.json", JSON.stringify({ name: "api", scripts: { typecheck: ok } }));
+  const y = await load();
+  const ctx2 = y.ctxFor(root);
+  await y.emit("session_start", {}, ctx2);
+  const two = await y.runChecks(ctx2);
+  assert.ok(two.includes("nested projects: api, site") && two.includes("pass files"), two);
+  x.cleanup();
+  y.cleanup();
   rmSync(root, { recursive: true, force: true });
 });
 

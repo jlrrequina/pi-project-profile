@@ -11,7 +11,7 @@ import { detectCI, detectConventions, detectInstructions, detectRepoShape, detec
 import { detectRust } from "./rust.ts";
 
 /** Bump when detector output changes shape/semantics so caches refresh. */
-export const DETECTOR_VERSION = 12;
+export const DETECTOR_VERSION = 13;
 
 const LANG_EXTS: Record<string, string[]> = { TypeScript: [".ts", ".tsx", ".mts", ".cts"], JavaScript: [".js", ".jsx", ".mjs", ".cjs"], Python: [".py"], Rust: [".rs"], Go: [".go"], Ruby: [".rb"], Java: [".java"], Kotlin: [".kt", ".kts"], Scala: [".scala"], Swift: [".swift"], PHP: [".php"], Elixir: [".ex", ".exs"], Dart: [".dart"], C: [".c", ".h"], "C++": [".cc", ".cpp", ".cxx", ".hpp"], Zig: [".zig"], Haskell: [".hs"], OCaml: [".ml", ".mli"], "C#": [".cs"], "F#": [".fs"], Lua: [".lua"], Perl: [".pl", ".pm"], Erlang: [".erl"], Gleam: [".gleam"], Nim: [".nim"], Julia: [".jl"], R: [".r"], "HCL (Terraform)": [".tf"], Shell: [".sh", ".bash"], Markdown: [".md"] };
 
@@ -61,7 +61,7 @@ function detectSubprojects(b: Builder): void {
   };
   scan(".", 0);
   if (found.length === 0) return;
-  b.monorepo = { kind: "multi-project repo", packages: found.length };
+  b.monorepo = { kind: "multi-project repo", packages: found.length, dirs: found };
   b.add(`multi-project repo: ${found.slice(0, 8).join(", ")}${found.length > 8 ? ` (+${found.length - 8})` : ""}`);
   for (const l of langs) b.lang(l);
   b.note("no manifest at the repo root — run pi from inside a package for commands and checks, or /profile set them here");

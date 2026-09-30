@@ -117,7 +117,8 @@ export interface DetectedProfile {
   layout: string[];
   services: string[];
   notes: string[];
-  monorepo?: { kind: string; packages?: number; tool?: string };
+  /** `dirs`: the nested projects of an umbrella repo without a manifest at its root (relative to root). */
+  monorepo?: { kind: string; packages?: number; tool?: string; dirs?: string[] };
   /** Test naming/location conventions from the tracked files. */
   tests?: string;
   /** `.gitattributes` linguist-generated patterns (hand edits are overwritten). */

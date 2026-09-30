@@ -29,7 +29,7 @@ A coding agent dropped into an unfamiliar repository guesses: which package mana
 ## How it works
 
 1. **Session start** — the repository is scanned (manifests, lockfiles, CI files, Makefiles, instruction files; nothing is executed), cached under `~/.pi/agent/project-profile/`, and rendered as `<project_profile>` in the system prompt. Re-detection happens automatically when a manifest changes.
-2. **Each turn** — files the agent touches are tracked; nested `AGENTS.md`/`CLAUDE.md` and glob-scoped rules that apply to them are delivered with the first matching tool result; generated files get a warning.
+2. **Each turn** — files the agent touches are tracked; nested `AGENTS.md`/`CLAUDE.md` and glob-scoped rules that apply to them are delivered with the first matching tool result; generated files get a warning. The agent's first read in a project directory starts that project's typecheck and lint once, in the background, on the untouched tree: whatever already fails there is the baseline, so it is never blamed on the agent (a run that finishes after the agent's first write is discarded).
 3. **Before the turn settles** — if files changed, the syntax, typecheck and lint tiers run (tests and builds once you have allowed them for the repo). New failures go back to the agent as a `[verification]` message for at most three repair rounds; pre-existing failures are reported to you once and never blamed on the agent. The diff review runs alongside.
 
 ## Install
@@ -70,7 +70,7 @@ The section is identical for every turn of a session, so prompt caching keeps wo
 
 Installs, migrations, deploys and anything network-bound are never run.
 
-- **Only new failures cost repair rounds.** Diagnostics recorded before a prompt (a repo that was already red) are pre-existing: not sent back to the agent, noted once for you, and they don't block the tests.
+- **Only new failures cost repair rounds.** Diagnostics recorded before the agent's first write (a repo that was already red) are pre-existing: not sent back to the agent, noted once for you, and they don't block the tests. The baseline comes from a background run of the project-wide typecheck and lint, started by the agent's first read in each project directory (at most four per session; workspace-wide scripts such as `turbo run lint` are not started this way).
 - **Narrowed runs.** Tests run as `vitest related`, `jest --findRelatedTests`, `go test ./<pkg>/...`, `cargo test -p <package>` or `pytest <changed test files>` when that is safe; `cargo check` drops `--all-targets` when no test/bench/example code changed. Monorepo packages are checked in their own directory with their own scripts, and a workspace-wide root run replaces the per-package duplicates.
 - **Fast.** Read-only checks in a tier run in parallel; tests and builds run one at a time.
 - **Actionable failures.** Diagnostic lines first (~40 lines, full log path), plus the exact auto-fix command for format/lint failures (`prettier --write <files>`, `ruff check --fix <files>`, …).
@@ -102,7 +102,7 @@ Secrets, stale lockfiles and `.only` get one follow-up turn; weakening added whi
 | `/profile verify on\|off` | per-repo switch for the gate |
 | `/profile forget` | drop cache and user data for this repo |
 | `/verify [fast\|lint\|test\|build\|all] [file…]` | run checks now, showing every failure (`/verify cancel` aborts) |
-| `run_checks` | the same, as a tool the model can call mid-task |
+| `run_checks` | the same, as a tool the model can call mid-task; at an umbrella directory without a manifest it runs the single nested project, or names the nested projects when there are several |
 
 ## Configuration
 
@@ -150,7 +150,7 @@ The failing diagnostics (pruned to ~40 lines, with the full log path and an auto
 
 ### My repo was already failing before the agent touched it. Will the agent try to fix that?
 
-No. Diagnostics recorded before the prompt are pre-existing: hidden from the agent, reported to you once, and they don't block the test tier. `/verify` still shows everything.
+No. The project-wide typecheck and lint run once in the background when the agent starts reading, before it writes; what fails then is pre-existing: hidden from the agent, reported to you once ("already fails on the untouched tree"), and it doesn't block the test tier. `/verify` still shows everything.
 
 ### Does it break prompt caching?
 

@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+From a review of every gate failure in the author's own sessions: all of them were failures that existed before the task (a monorepo root `tsc` over 552 files, 805 lint warnings and 424 unformatted files on `main`, a stale `dist`), and the agent spent turns and `git stash` proving it.
+
+- **Baseline before the first write.** The agent's first read in a project directory starts that project's project-wide typecheck and lint once, in the background, on the untouched tree (the session root at the first prompt as well; at most four directories per session; workspace-wide scripts such as `turbo run lint` are not started this way). What fails there is the pre-existing baseline for the whole session, so the first prompt is no longer the one where every old failure is blamed on the agent. A run that finishes after a write, a shell change or a new prompt is discarded; a run stopped by the gate never marks a check as disabled. The user sees `already fails on the untouched tree (N diagnostics)` once; the agent sees `no new failures` instead of a repair round.
+- Detection: a workspace root whose `tsconfig.json` only extends a base config (no `include`, `files` or `references`) gets no synthesized `tsc --noEmit -p tsconfig.json` — that command compiles every package with the base options (thousands of bogus errors, a 2 MB log per run); typecheck runs per package instead, and the profile says so. `DETECTOR_VERSION` 13.
+- Output pruning: eslint's stylish output as `next lint` prints it (`54:13  Warning: …`) and prettier's `[warn] <file>` lines are diagnostics now; the file header above a stylish block is kept with its lines and is part of the baseline key, so the same rule in two files is two known failures. Before, both outputs were reduced to pnpm's `ELIFECYCLE Command failed` line with "805 more lines".
+- Fix hints: a failing project-wide format script (`prettier --check .`) suggests `prettier --write <the files you changed>` instead of the project's `format` script, which would rewrite every unformatted file in the tree; when only the project script is available, the hint says it rewrites everything and to check `git status`. Paths with shell-special characters (`app/(admin)/…`) are quoted.
+- `run_checks` and `/verify` without files at an umbrella directory (no manifest at the root) run the single nested project, or name the nested projects when there are several, instead of answering "no applicable checks".
+- A session started in the home directory gets no profile: nothing is injected into the prompt (the layout of `~` is private and no check can run there), nothing is cached, verification stays off.
+- The "no changes since the last failure" message no longer contradicts the instruction to stop when a failure is pre-existing.
+
 ## 1.1.0 — 2026-09-29
 
 - **Bundled Agent Skill** `project-profile` (`/skill:project-profile`): an operating and troubleshooting guide the model loads on demand — how to read the `<project_profile>` section, what each `[verification]` message means and what to do, the `run_checks` tool, every `/profile` and `/verify` command, a symptom → fix table and all configuration keys. Declared in the `pi` manifest and listed in the π package catalog as a skill.

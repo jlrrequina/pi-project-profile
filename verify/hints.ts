@@ -33,23 +33,47 @@ const RULES: Rule[] = [
 ];
 
 function quote(f: string): string {
-  return /[\s"'$`\\]/.test(f) ? `'${f.replace(/'/g, `'\\''`)}'` : f;
+  return /[\s"'$`\\()<>|&;*?\[\]{}]/.test(f) ? `'${f.replace(/'/g, `'\\''`)}'` : f;
+}
+
+/** `npx` / `pnpm exec` / … for the package manager a script-based check runs through. */
+function execPrefix(argv0: string | undefined): string | undefined {
+  switch (argv0) {
+    case "npm":
+      return "npx";
+    case "pnpm":
+      return "pnpm exec";
+    case "yarn":
+      return "yarn";
+    case "bun":
+      return "bunx";
+    default:
+      return undefined;
+  }
 }
 
 /**
  * The fix command for a failing check, or undefined when there is no safe
- * mechanical fix. `files` are the files the check ran on (relative to its cwd).
+ * mechanical fix. `files` are the files the check ran on (relative to its cwd),
+ * or, for a project-wide check, the files the agent changed under it.
  */
 export function fixHint(check: Check, files: string[] = [], commands: Record<string, CommandInfo> = {}): string | undefined {
   if (check.label !== "format" && check.label !== "lint" && check.label !== "imports") return undefined;
   const cmd = check.cmd;
   const direct = !/^(npm|pnpm|yarn|bun) (run )?\S+$/.test(cmd.trim()) && !/^(make|just|task) \S+$/.test(cmd.trim());
+  const list = files.filter((f) => f && !f.startsWith("-"));
+  // A project-wide format script (`prettier --check .`) fails for the agent's files: format those, never the whole tree
+  // (a repo that was never formatted would get hundreds of unrelated rewrites).
+  if (!direct && check.label === "format" && list.length > 0 && list.length <= 12) {
+    const px = execPrefix(check.argv[0]);
+    if (px && check.tool === "prettier") return `${px} prettier --write ${list.map(quote).join(" ")}`;
+    if (px && check.tool === "biome") return `${px} biome format --write ${list.map(quote).join(" ")}`;
+  }
   if (direct) {
     const rule = RULES.find(([re]) => re.test(cmd));
     if (!rule) return undefined;
     let fixed = rule[1](cmd).replace(/\s+/g, " ").trim();
     if (fixed.includes("<files>")) {
-      const list = files.filter((f) => f && !f.startsWith("-"));
       if (list.length === 0 || list.length > 12) fixed = fixed.replace(/\s*<files>/, check.unscopedArgs?.length ? ` ${check.unscopedArgs.join(" ")}` : "");
       else fixed = fixed.replace("<files>", list.map(quote).join(" "));
     }

@@ -40,7 +40,9 @@ Call `run_checks` after substantial changes instead of guessing test or lint com
 - `tier: "all"` → everything permitted.
 - `files: [...]` → limit per-file checks to those paths.
 
-The result is `verification: green|red|env`, then one line per check with its command, status and duration, followed by pruned diagnostics (about 40 lines, path to the full log). Diagnostics that already failed before the prompt started are counted as *known* and hidden — leave them alone unless asked.
+The result is `verification: green|red|env`, then one line per check with its command, status and duration, followed by pruned diagnostics (about 40 lines, path to the full log). Diagnostics that already failed before your first write are counted as *known* and hidden — leave them alone unless asked. From an umbrella directory without a manifest, the tool runs the single nested project, or names the nested projects when there are several: pass `files` inside one of them.
+
+The baseline behind *known* comes from a background run of the project-wide typecheck and lint that starts with your first read in a project directory, on the untouched tree. Read before you write, as usual; there is nothing to call.
 
 ## What the `[verification]` messages mean
 
@@ -49,7 +51,9 @@ The result is `verification: green|red|env`, then one line per check with its co
 | `✗ <check> — \`cmd\` exited N — repair round r of max` | The check fails with *new* diagnostics attributable to this task. | Fix the cause in code, then end the turn; it re-runs automatically. Never skip, disable, loosen or suppress the check, and never report success while it fails. |
 | `(N other diagnostic lines … already failed before this task and are hidden)` | Pre-existing failures, not yours. | Ignore unless the user asks. |
 | `no new failures from this task. Already failing before it and left alone: …` | Gate is green for your work; the repo was already red elsewhere. | Mention it in your summary; do not fix it unprompted. |
-| `automatic repair stopped: … Still failing: …` | Round budget exhausted, or a round changed nothing / repeated the same failure. | Do not edit further. Report what fails, what you tried, your hypothesis and a recommendation. Do not claim completion. |
+| `automatic repair stopped: … Still failing: …` | Round budget exhausted, or a round repeated the same failure. | Do not edit further. Report what fails, what you tried, your hypothesis and a recommendation. Do not claim completion. |
+| `still unresolved and no files were changed in the last turn` | You ended a turn without changes after a failure. | If you already explained that the failure is not caused by this task, nothing more is needed; otherwise do not claim completion. |
+| `Auto-fix available: \`<pm> run format\` — it rewrites every file the script covers` | The only mechanical fix is a project-wide script. | Prefer the file-scoped form when one is shown; after a project-wide run, check `git status` and revert files outside your change. |
 | `review of this task's changes:` | The diff review found weakening (suppression, `.skip`/`.only`, stub, loosened config), a secret, an unignored `.env` or a lockfile out of date. | Remove the weakening or explain why it is required; move credentials out of the code; run the lockfile command listed. |
 | `fast check after this turn: ✗ …` | `verify.perTurn` informational note; no repair loop. | Finish the multi-file change, then make it green. |
 | `<check> disabled this session — <reason>` (shown to the user) | Environment failure: tool missing, dependencies not installed, timeout, service down. | Not your job. If asked, point the user at `/profile doctor` for the fix command. |

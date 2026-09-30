@@ -12,7 +12,7 @@
  */
 import { sep } from "node:path";
 import { sha1 } from "../fs-utils.ts";
-import { isDiagnosticLine, splitLines } from "./prune.ts";
+import { isDiagnosticLine, splitLines, stylishHeader } from "./prune.ts";
 
 export type DiagSet = Map<string, number>;
 
@@ -44,7 +44,9 @@ export function analyzeDiagnostics(text: string, cwd?: string): DiagAnalysis {
   const lines: DiagAnalysis["lines"] = [];
   for (let i = 0; i < all.length; i++) {
     if (!isDiagnosticLine(all[i]!) || WRAPPER.test(all[i]!)) continue;
-    const key = normalizeDiag(all[i]!, cwd);
+    // eslint stylish prints the file once above its `line:col` diagnostics: the key needs it to tell files apart.
+    const header = stylishHeader(all, i);
+    const key = (header !== undefined ? normalizeDiag(all[header]!, cwd) + " " : "") + normalizeDiag(all[i]!, cwd);
     if (!key) continue;
     lines.push({ index: i, key });
     keys.set(key, (keys.get(key) ?? 0) + 1);

@@ -12,7 +12,7 @@ import { emptyUserData, isStale, loadOrDetect, updateUser } from "../profile/sto
 import { DEFAULT_CONFIG, type Check, type StoredProfile } from "../types.ts";
 import { classifyFailure } from "../verify/classify.ts";
 import { buildPlan, isDocOnly, TIER_ORDER, type Plan } from "../verify/plan.ts";
-import { pruneOutput } from "../verify/prune.ts";
+import { pruneOutput, splitLines, stylishHeader } from "../verify/prune.ts";
 import { resolveArgv, resolvePython } from "../verify/resolve.ts";
 import { platformArgv, runCommand } from "../verify/run.ts";
 import { scopeCheck, scopeFromScript } from "../verify/scope.ts";
@@ -319,6 +319,29 @@ test("pruneOutput extracts tsc/cargo/pytest diagnostics", () => {
   assert.ok(g.lines.length <= 22);
 });
 
+test("pruneOutput: eslint stylish keeps the file header with its `line:col Warning:` lines; prettier --check lists files; pnpm's ELIFECYCLE is never the only line", () => {
+  // `next lint` through pnpm: the wrapper line comes first, the diagnostics use `Warning:`/`Error:` (capitalised, colon).
+  const lint = `> web@0.1.0 lint /repo/apps/web\n> next lint\n\n ELIFECYCLE  Command failed with exit code 1.\n\n./app/admin/banner-dialog.tsx\n54:13  Warning: 'React' is not defined.  no-undef\n\n./app/admin/family-circle.tsx\n52:49  Warning: \`"\` can be escaped with \`&quot;\`.  react/no-unescaped-entities\n60:43  Error: React Hook "useFamilyCircle" is called conditionally.  react-hooks/rules-of-hooks\n`;
+  const p = pruneOutput(lint, 40);
+  assert.equal(p.diagnosticCount, 4, "three stylish lines + the wrapper line");
+  assert.ok(p.lines.includes("./app/admin/banner-dialog.tsx") && p.lines.includes("./app/admin/family-circle.tsx"), p.lines.join("\n"));
+  assert.ok(p.lines.indexOf("./app/admin/family-circle.tsx") < p.lines.findIndex((l) => l.startsWith("60:43")), "header precedes its diagnostics");
+  assert.deepEqual(p.files, ["./app/admin/banner-dialog.tsx", "./app/admin/family-circle.tsx"]);
+  // The baseline key carries the file, so the same rule in two files is two keys.
+  const keys = analyzeDiagnostics(lint).keys;
+  assert.ok([...keys.keys()].some((k) => k.startsWith("./app/admin/banner-dialog.tsx N:N Warning: 'React' is not defined.")), [...keys.keys()].join("|"));
+  assert.ok(![...keys.keys()].some((k) => k.includes("ELIFECYCLE")), "wrapper lines are not baseline keys");
+  assert.equal(stylishHeader(splitLines(lint), 6), 5);
+  assert.equal(stylishHeader(splitLines(lint), 3), undefined, "the wrapper line has no header");
+  // prettier --check
+  const fmt = `> web@0.1.0 format:check /repo/apps/web\n> prettier --check .\n\nChecking formatting...\n ELIFECYCLE  Command failed with exit code 1.\n[warn] actions/blogs.ts\n[warn] app/(admin)/dialog.tsx\n[warn] Code style issues found in 2 files. Run Prettier with --write to fix.\n`;
+  const f = pruneOutput(fmt, 40);
+  assert.ok(f.lines.includes("[warn] actions/blogs.ts") && f.lines.includes("[warn] app/(admin)/dialog.tsx"), f.lines.join("\n"));
+  assert.ok(f.lines.some((l) => l.includes("Code style issues found in 2 files")));
+  const fk = analyzeDiagnostics(fmt).keys;
+  assert.ok(fk.has("[warn] actions/blogs.ts") && fk.has("[warn] app/(admin)/dialog.tsx"), [...fk.keys()].join("|"));
+});
+
 test("classifyFailure distinguishes env from code", () => {
   const base = { code: 1, signal: null, stdout: "", stderr: "", timedOut: false, durationMs: 1, truncated: false };
   assert.equal(classifyFailure({ ...base, code: 127, stderr: "sh: tsc: command not found" }, { diagnosticCount: 0, combined: "sh: tsc: command not found" }).kind, "env");
@@ -402,6 +425,28 @@ test("pnpm workspace: package files run the package's own typecheck with the wor
   // two packages changed → two package-level runs, still no root run
   const p3 = buildPlan([join(root, "packages/a/src/index.ts"), join(root, "packages/b/src/index.ts")], opts).byTier.get("fast")!;
   assert.deepEqual(p3.map((p) => relOf(root, p.check.cwd)).sort(), ["packages/a", "packages/b"]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a workspace root's bare tsconfig (extends + compilerOptions only) gets no synthesized tsc; a single package's does", () => {
+  const root = tmp();
+  const bare = JSON.stringify({ extends: "@repo/typescript-config/base.json", compilerOptions: { strictNullChecks: true } });
+  write(root, "package.json", JSON.stringify({ name: "ws", private: true, scripts: { lint: "turbo run lint" }, devDependencies: { typescript: "5", turbo: "2" } }));
+  write(root, "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n");
+  write(root, "pnpm-lock.yaml", "");
+  write(root, "tsconfig.json", bare);
+  write(root, "apps/api/package.json", JSON.stringify({ name: "api", devDependencies: { typescript: "5" } }));
+  write(root, "apps/api/tsconfig.json", bare);
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const ws = detectProject(root, config);
+  assert.equal(ws.checks.find((c) => c.id === "node:typecheck"), undefined, "no root tsc over every package");
+  assert.equal(ws.commands["typecheck"], undefined);
+  assert.ok(ws.notes.some((n) => n.includes("typecheck runs per package")), ws.notes.join("|"));
+  // the package itself (no workspace globs of its own) keeps the default tsc over its directory
+  assert.equal(detectProject(join(root, "apps/api"), config, root).checks.find((c) => c.id === "node:typecheck")?.cmd, "pnpm exec tsc --noEmit -p tsconfig.json");
+  // a workspace root whose tsconfig lists its own files is a project: tsc runs
+  write(root, "tsconfig.json", JSON.stringify({ extends: "./base.json", include: ["scripts"] }));
+  assert.equal(detectProject(root, config).checks.find((c) => c.id === "node:typecheck")?.cmd, "pnpm exec tsc --noEmit -p tsconfig.json");
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -621,6 +666,13 @@ test("fixHint turns the check into its writing counterpart for the files it ran 
   assert.equal(fixHint(c("pnpm run lint", "lint"), [], { fix: { cmd: "pnpm run lint:fix", source: "s" } }), "pnpm run lint:fix");
   assert.equal(fixHint(c("pnpm run lint", "lint"), []), undefined);
   assert.equal(fixHint(c("tsc --noEmit", "typecheck")), undefined);
+  // a project-wide format script (`prettier --check .`) with the agent's files known: format those files, not the tree
+  const wide = c("pnpm run format:check", "format", { argv: ["pnpm", "run", "format:check"], tool: "prettier" });
+  assert.equal(fixHint(wide, ["app/(admin)/dialog.tsx", "actions/blogs.ts"], { format: { cmd: "pnpm run format", source: "s" } }), "pnpm exec prettier --write 'app/(admin)/dialog.tsx' actions/blogs.ts");
+  assert.equal(fixHint({ ...wide, argv: ["npm", "run", "format:check"] }, ["a.ts"]), "npx prettier --write a.ts");
+  assert.equal(fixHint({ ...wide, tool: "biome" }, ["a.ts"]), "pnpm exec biome format --write a.ts");
+  // too many or no files: back to the project's own writer (the caller warns that it rewrites everything)
+  assert.equal(fixHint(wide, Array.from({ length: 13 }, (_, i) => `f${i}.ts`), { format: { cmd: "pnpm run format", source: "s" } }), "pnpm run format");
 });
 
 test("node detector records only writing scripts as format/fix commands", () => {

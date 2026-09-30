@@ -19,20 +19,22 @@ import { Box, Markdown, Text } from "@earendil-works/pi-tui";
 import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { agentDir, configPath, loadConfig, writeDefaultConfig } from "./config.ts";
-import { findProjectRoot } from "./detect/index.ts";
-import { realpath, tildify, uniq } from "./fs-utils.ts";
+import { findProjectRoot, nearestProjectDir } from "./detect/index.ts";
+import { ext, realpath, tildify, uniq } from "./fs-utils.ts";
 import { availability, effectiveChecks, effectiveCommands, renderPromptSection, renderReport, tierAllowed } from "./profile/render.ts";
 import { deleteStored, loadOrDetect, profilePath, pruneProfiles, updateUser } from "./profile/store.ts";
-import type { GateVerdict, ProfileConfig, StoredProfile, Tier } from "./types.ts";
+import type { Check, GateVerdict, ProfileConfig, StoredProfile, Tier } from "./types.ts";
 import { collectChanges, displayPath, newTracker, peekChanges, snapshotStart, toolPath, type ChangeTracker } from "./verify/changes.ts";
 import { describeRuns, runGate, type GateHooks } from "./verify/gate.ts";
-import { buildPlan, TIER_ORDER, type PlannedCheck } from "./verify/plan.ts";
+import { buildPlan, isIgnoredPath, TIER_ORDER, type PlannedCheck } from "./verify/plan.ts";
 import { logDir, pruneLogs } from "./verify/run.ts";
+import { diagCount } from "./verify/baseline.ts";
 import { collectFindings, formatFinding, headContent, isWeakening, mustFix, readForDiff, SKIP, type Before, type Finding } from "./verify/findings.ts";
 import { fixHint } from "./verify/hints.ts";
 import { doctorReport } from "./profile/doctor.ts";
 import { discoverRules, generatedPatterns, generatedReason, matchingRules, nestedInstructionFiles, readInstruction, renderInjection, type InjectionPart, type ScopedRule } from "./profile/scoped.ts";
 import { readFileSync, statSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { appendFileSync } from "node:fs";
@@ -49,6 +51,8 @@ function debug(event: string, data: Record<string, unknown> = {}): void {
 }
 const REPORT_ENTRY = "project-profile/report";
 const STATUS_KEY = "verify";
+/** Project dirs whose checks get a baseline run per session (bounds the background work in monorepos). */
+const MAX_BASELINES = 4;
 
 interface PromptState {
   seq: number;
@@ -67,10 +71,12 @@ interface PromptState {
   reported: Set<string>;
   /** The diff guard already used its one follow-up turn. */
   findingsContinued: boolean;
+  /** Mutation tool calls so far in this prompt (a baseline that finishes after one is discarded). */
+  mutations: number;
 }
 
 function newPrompt(seq: number): PromptState {
-  return { seq, repairRound: 0, pendingRepair: false, finalized: false, mustRun: [], orig: new Map(), files: new Set(), reported: new Set(), findingsContinued: false };
+  return { seq, repairRound: 0, pendingRepair: false, finalized: false, mustRun: [], orig: new Map(), files: new Set(), reported: new Set(), findingsContinued: false, mutations: 0 };
 }
 
 interface SessionState {
@@ -100,6 +106,10 @@ interface SessionState {
   promptBaseline: Map<string, Map<string, number>>;
   /** Checks whose pre-existing failures were already reported to the user this session. */
   notifiedKnown: Set<string>;
+  /** Baseline runs (project-wide auto checks on the untouched tree) per project dir, started by the agent's first read there. */
+  baselines: Map<string, { promise: Promise<void>; done: boolean; abort: AbortController }>;
+  /** Status line text outside of check runs. */
+  idleStatus?: string;
   /** Glob-scoped / always-on rule files (.cursor/rules, .github/instructions, .windsurf/rules). */
   rules: ScopedRule[];
   /** Instruction files (abs paths and "#"+content hashes) already delivered this session. */
@@ -241,9 +251,81 @@ export default function projectProfile(pi: ExtensionAPI) {
     }
   }
 
-  function hintFor(r: GateVerdict["runs"][number]): string | undefined {
+  /**
+   * Pre-existing failures must not cost repair rounds in the first prompt either: run a project dir's project-wide
+   * auto checks once on the untouched tree, in the background, and record their diagnostics as the baseline. The agent
+   * reads before it writes, so its first read in a project dir is the trigger; the run is discarded when anything
+   * changed before it finished, because its output could then include the agent's own work.
+   */
+  function startBaseline(ctx: ExtensionContext, projectDir: string): void {
+    const st = s!;
+    if (st.baselines.has(projectDir) || st.baselines.size >= MAX_BASELINES) return;
+    if (!verifyEnabled() || !ctx.isProjectTrusted() || st.prompt.mutations > 0) return;
+    const stored = profileFor(projectDir);
+    if (!stored) return;
+    // Workspace-wide runs (turbo, pnpm -r) fan out over every package: too much background work for a guess.
+    const eligible = (c: Check) => (c.tier === "fast" || c.tier === "lint") && !c.appendFiles && !c.coversWorkspace && !st.lastDiag.has(c.id + "@" + c.cwd);
+    const plan = buildPlan([], { projectRoot: projectDir, gitRoot: st.gitRoot, ignoreDirs: st.config.ignoreDirs, profileFor, checksFor: (p) => effectiveChecks(p).filter(eligible), unscoped: true });
+    if (TIER_ORDER.every((t) => (plan.byTier.get(t)?.length ?? 0) === 0)) return;
+    const seq = st.prompt.seq;
+    const abort = new AbortController();
+    st.abort.signal.addEventListener("abort", () => abort.abort(), { once: true });
+    const entry = { promise: Promise.resolve(), done: false, abort };
+    entry.promise = (async () => {
+      const hooks = makeHooks(ctx, abort.signal, { interactive: false, baseline: false });
+      hooks.stopOnRed = false;
+      hooks.broken = new Map(); // an aborted or discarded run must not disable checks for the session
+      hooks.progress = (t) => setStatus(ctx, `\u23f3 baseline ${t}`);
+      const verdict = await runGate(plan, st.config, hooks);
+      const peeked = st.gitRoot && !abort.signal.aborted ? await peekChanges(st.tracker) : undefined;
+      const changed = abort.signal.aborted || st.prompt.mutations > 0 || st.prompt.seq !== seq || (st.gitRoot ? (peeked ?? ["?"]).length > 0 : st.tracker.bashRan);
+      debug("baseline", { seq, dir: displayPath(st.root, projectDir) || ".", discarded: changed, status: verdict.status, ms: verdict.durationMs, runs: verdict.runs.map((r) => ({ id: r.check.id, status: r.status, code: r.exitCode, lines: r.diag ? diagCount(r.diag) : undefined })) });
+      if (changed) {
+        st.baselines.delete(projectDir); // a later read may try again on a quiet tree
+        return;
+      }
+      for (const [k, v] of hooks.broken) st.broken.set(k, v);
+      reportEnvFailures(ctx, verdict);
+      recordDiag(verdict);
+      for (const r of verdict.runs) {
+        if (!r.diag || r.scoped) continue;
+        const key = r.check.id + "@" + r.check.cwd;
+        st.promptBaseline.set(key, r.diag);
+        if (r.status !== "fail" || st.notifiedKnown.has(key)) continue;
+        st.notifiedKnown.add(key);
+        notify(ctx, `verify: ${r.check.label}${whereOf(r.check.cwd)} already fails on the untouched tree (${diagCount(r.diag)} diagnostic${diagCount(r.diag) === 1 ? "" : "s"}) \u2014 only new failures are sent to the agent`, "info");
+      }
+    })()
+      .catch((err: Error) => debug("baseline-error", { dir: projectDir, error: err.message }))
+      .finally(() => {
+        entry.done = true;
+        if (!st.gateRunning) setStatus(ctx, st.idleStatus);
+      });
+    st.baselines.set(projectDir, entry);
+  }
+
+  /** The tree is about to be checked for real: a baseline still running would be discarded anyway, so stop it now. */
+  async function stopBaselines(): Promise<void> {
+    const pending = Array.from(s!.baselines.values()).filter((b) => !b.done);
+    for (const b of pending) b.abort.abort();
+    await Promise.all(pending.map((b) => b.promise));
+  }
+
+  function baselinePending(): boolean {
+    return Array.from(s!.baselines.values()).some((b) => !b.done);
+  }
+
+  /** Fix hint for a failing run; project-wide checks get the agent's changed files under their cwd so the hint stays file-scoped. */
+  function hintFor(r: GateVerdict["runs"][number], changed: string[] = []): string | undefined {
     const prof = profileFor(r.check.cwd) ?? s!.stored;
-    return fixHint(r.check, r.files ?? [], prof ? effectiveCommands(prof) : {});
+    const own = changed.filter((f) => f.startsWith(r.check.cwd + sep) && (!r.check.exts?.length || r.check.exts.includes(ext(f)))).map((f) => relative(r.check.cwd, f).split(sep).join("/"));
+    return fixHint(r.check, r.files ?? own, prof ? effectiveCommands(prof) : {});
+  }
+
+  /** A project script rewrites everything it covers, not only the agent's files: say so. */
+  function hintLine(hint: string, then: string): string {
+    const wide = /^(npm|pnpm|yarn|bun) (run )?\S+$/.test(hint) || /^(make|just|task) \S+$/.test(hint);
+    return wide ? `Auto-fix available: \`${hint}\` — it rewrites every file the script covers: run it, check \`git status\`, revert files outside your change${then}` : `Auto-fix available: \`${hint}\`${then}`;
   }
 
   /** Content of a file when the prompt started: captured before the first tool write, else git HEAD for files that were clean then. */
@@ -356,8 +438,8 @@ export default function projectProfile(pi: ExtensionAPI) {
       const shown = r.summary.length;
       if (r.totalLines > shown) lines.push(`(${r.totalLines - shown} more lines${r.logPath ? `; full log: ${r.logPath}` : ""})`);
       else if (r.logPath) lines.push(`(full log: ${r.logPath})`);
-      const hint = hintFor(r);
-      if (hint) lines.push(`Auto-fix available: \`${hint}\` — run it, then end your turn (verification re-runs).`);
+      const hint = hintFor(r, verdict.changedFiles);
+      if (hint) lines.push(hintLine(hint, " — run it, then end your turn (verification re-runs)."));
       if (r.preexisting) lines.push(`(${r.preexisting} other diagnostic line${r.preexisting === 1 ? "" : "s"} of this check already failed before this task and ${r.preexisting === 1 ? "is" : "are"} hidden — leave ${r.preexisting === 1 ? "it" : "them"} alone unless asked.)`);
     }
     if (passed.length) lines.push(`Passed: ${uniq(passed).join(", ")}.`);
@@ -394,7 +476,7 @@ export default function projectProfile(pi: ExtensionAPI) {
     return drafts;
   }
 
-  async function buildGatePlan(files: string[], opts: { unscoped: boolean; mustRun?: PlannedCheck[] }) {
+  async function buildGatePlan(files: string[], opts: { unscoped: boolean; mustRun?: PlannedCheck[]; roots?: string[] }) {
     const st = s!;
     return buildPlan(files, {
       projectRoot: st.root,
@@ -404,6 +486,7 @@ export default function projectProfile(pi: ExtensionAPI) {
       checksFor: (stored) => effectiveChecks(stored),
       mustRun: opts.mustRun,
       unscoped: opts.unscoped,
+      roots: opts.roots,
     });
   }
 
@@ -471,6 +554,7 @@ export default function projectProfile(pi: ExtensionAPI) {
       lastDiag: new Map(),
       promptBaseline: new Map(),
       notifiedKnown: new Set(),
+      baselines: new Map(),
       rules: discoverRules(uniq([root, gitRoot ?? root])),
       injected: new Set(),
       genPatterns: generatedPatterns(readTextSafe(join(gitRoot ?? root, ".gitattributes"))),
@@ -479,6 +563,13 @@ export default function projectProfile(pi: ExtensionAPI) {
       hasUI: ctx.hasUI,
     };
     for (const i of issues) notify(ctx, `project-profile config: ${i}`, "warning");
+    pruneLogs();
+    pruneProfiles(dir);
+    // The home directory is not a project: profiling it would put its private layout into the prompt and run nothing useful.
+    if (root === realpath(homedir())) {
+      setStatus(ctx, "no project (home directory)");
+      return;
+    }
     try {
       const { stored, refreshed } = loadOrDetect(dir, root, config, gitRoot);
       s.stored = stored;
@@ -487,7 +578,8 @@ export default function projectProfile(pi: ExtensionAPI) {
       const auto = checks.filter((c) => (c.tier === "fast" || c.tier === "lint") && !availability(c)).length;
       const langs = stored.detected.languages.slice(0, 3).join("/") || "unknown stack";
       const trusted = ctx.isProjectTrusted();
-      setStatus(ctx, !trusted ? `${langs} · verify off (untrusted project)` : verifyEnabled() ? `${langs} · ${auto} auto-check${auto === 1 ? "" : "s"}` : `${langs} · verify off`);
+      s.idleStatus = !trusted ? `${langs} · verify off (untrusted project)` : verifyEnabled() ? `${langs} · ${auto} auto-check${auto === 1 ? "" : "s"}` : `${langs} · verify off`;
+      setStatus(ctx, s.idleStatus);
       if (refreshed && ctx.hasUI && ctx.mode === "tui") {
         const cmds = Object.entries(stored.detected.commands)
           .filter(([k]) => ["typecheck", "lint", "test", "build"].includes(k))
@@ -497,8 +589,6 @@ export default function projectProfile(pi: ExtensionAPI) {
     } catch (err) {
       notify(ctx, `project-profile: detection failed — ${(err as Error).message}`, "warning");
     }
-    pruneLogs();
-    pruneProfiles(dir);
   });
 
   pi.on("session_shutdown", async (_event, ctx) => {
@@ -518,6 +608,7 @@ export default function projectProfile(pi: ExtensionAPI) {
     if (verifyEnabled()) {
       await snapshotStart(s.tracker);
       s.prompt.startSnapshot = s.tracker.snapshot ? new Map(s.tracker.snapshot) : undefined;
+      if (s.stored) startBaseline(ctx, s.root);
     }
     if (!s.config.profile.inject || !s.stored) return;
     const loaded = (event.systemPromptOptions.contextFiles ?? []).map((f) => f.path);
@@ -533,7 +624,9 @@ export default function projectProfile(pi: ExtensionAPI) {
   // ------------------------------------------------------------------ change tracking
   const isMutationTool = (name: string) => name === "write" || name === "edit" || (/edit|write|patch|apply|replace|insert|move|rename|delete|create/i.test(name) && !/read|grep|find|search|list|ls|describe|status/i.test(name));
   pi.on("tool_call", async (event, ctx) => {
-    if (!s || !s.config.verify.guard || !isMutationTool(event.toolName)) return;
+    if (!s || !isMutationTool(event.toolName)) return;
+    s.prompt.mutations++;
+    if (!s.config.verify.guard) return;
     const input = event.input as Record<string, unknown>;
     const p = toolPath(ctx.cwd, input.path ?? input.file ?? input.filePath);
     if (p && !s.prompt.orig.has(p)) s.prompt.orig.set(p, readForDiff(p));
@@ -579,6 +672,8 @@ export default function projectProfile(pi: ExtensionAPI) {
     const display = (p: string) => relative(top, p).split(sep).join("/") || ".";
     const notes: string[] = [];
     const mutation = isMutationTool(event.toolName);
+    // A read is the earliest sign of where the agent will write: baseline that project's checks while the tree is untouched.
+    if (!mutation && st.stored && !isIgnoredPath(abs, st.config.ignoreDirs)) startBaseline(ctx, nearestProjectDir(abs, top));
     // Generated files: hand edits are overwritten on regeneration.
     if (mutation && st.config.verify.guard && !st.generatedWarned.has(abs)) {
       const orig = st.prompt.orig.get(given) ?? st.prompt.orig.get(abs);
@@ -658,13 +753,14 @@ export default function projectProfile(pi: ExtensionAPI) {
           st.prompt.finalized = true;
           setStatus(ctx, "✗ unresolved");
           notify(ctx, "verify: agent made no changes after the last failure — stopping automatic repair", "warning");
-          return { entries: [...event.entries, { type: "custom_message", customType: VERIFY_MSG, content: "[verification] the previous check failure is still unresolved and no files were changed in the last turn; automatic repair stopped. Do not claim the task is complete.", display: true, details: { seq: st.prompt.seq, kind: "giveup", headline: "no changes since last failure — stopped" } }] };
+          return { entries: [...event.entries, { type: "custom_message", customType: VERIFY_MSG, content: "[verification] the previous check failure is still unresolved and no files were changed in the last turn; automatic repair stopped. If you explained that the failure is not caused by this task, nothing more is needed; otherwise do not claim the task is complete.", display: true, details: { seq: st.prompt.seq, kind: "giveup", headline: "no changes since last failure — stopped" } }] };
         }
         return;
       }
       const plan = await buildGatePlan(files, { unscoped: unknownChanges && files.length === 0, mustRun: st.prompt.mustRun });
       const total = TIER_ORDER.reduce((n, t) => n + (plan.byTier.get(t)?.length ?? 0), 0);
       if (total === 0) return boundary(event.entries, [], false, findingsDraft(ctx, found, st.prompt.repairRound > 0));
+      await stopBaselines();
       const hooks = makeHooks(ctx, st.abort.signal, { interactive: true });
       setStatus(ctx, "⏳ verifying…");
       const verdict = await runGate(plan, st.config, hooks);
@@ -743,8 +839,8 @@ export default function projectProfile(pi: ExtensionAPI) {
       lines.push(...r.summary.slice(0, Math.max(8, Math.floor(st.config.verify.maxOutputLines / 2))));
       lines.push("```");
       if (r.totalLines > r.summary.length && r.logPath) lines.push(`(full log: ${r.logPath})`);
-      const hint = hintFor(r);
-      if (hint) lines.push(`Auto-fix available: \`${hint}\``);
+      const hint = hintFor(r, verdict.changedFiles);
+      if (hint) lines.push(hintLine(hint, ""));
     }
     lines.push("Informational: you are mid-task, so failures from work still in progress are expected. Address them as you continue; the full verification runs when you finish and will send a repair request if anything still fails.");
     return lines.join("\n");
@@ -757,7 +853,7 @@ export default function projectProfile(pi: ExtensionAPI) {
     const bash = st.turnBash;
     st.turnFiles.clear();
     st.turnBash = false;
-    if (event.outcome !== "completed" || st.gateRunning || !ctx.isProjectTrusted()) return;
+    if (event.outcome !== "completed" || st.gateRunning || baselinePending() || !ctx.isProjectTrusted()) return;
     if (files.size === 0 && !bash) return;
     st.gateRunning = true;
     try {
@@ -802,8 +898,13 @@ export default function projectProfile(pi: ExtensionAPI) {
     st.gateRunning = true;
     try {
       const files = (opts.files ?? []).map((f) => (isAbsolute(f) ? f : join(ctx.cwd, f))).map(realpath);
-      const plan = await buildGatePlan(files, { unscoped: files.length === 0 });
+      let plan = await buildGatePlan(files, { unscoped: files.length === 0 });
+      const planned = () => TIER_ORDER.reduce((n, t) => n + (plan.byTier.get(t)?.length ?? 0), 0);
+      // An umbrella root (no manifest) has nothing to run itself: one nested project is unambiguous, so run that one.
+      const nested = st.stored?.detected.monorepo?.dirs ?? [];
+      if (files.length === 0 && planned() === 0 && nested.length === 1) plan = await buildGatePlan([], { unscoped: true, roots: [join(st.root, nested[0]!)] });
       if (opts.tiers) for (const t of TIER_ORDER) if (!opts.tiers.includes(t)) plan.byTier.set(t, []);
+      await stopBaselines();
       const hooks = makeHooks(ctx, st.abort.signal, { interactive: opts.interactive, baseline: opts.baseline });
       hooks.stopOnRed = false;
       setStatus(ctx, "⏳ verifying…");
@@ -825,8 +926,15 @@ export default function projectProfile(pi: ExtensionAPI) {
       out.push(`${icon} **${r.check.label}** \`${r.check.cmd.replace(" <files>", "")}\` — ${r.status}${r.reason ? ` (${r.reason})` : ""} · ${(r.durationMs / 1000).toFixed(1)}s${r.check.cwd !== s!.root ? ` · ${displayPath(s!.root, r.check.cwd)}` : ""}`);
       if (r.summary.length) out.push("```\n" + r.summary.join("\n") + "\n```" + (r.logPath ? `\n(full log: ${r.logPath})` : ""));
     }
-    if (verdict.runs.length === 0) out.push("(no applicable checks)");
+    if (verdict.runs.length === 0) out.push(noChecksNote());
     return out.join("\n");
+  }
+
+  /** Why an unscoped run had nothing to do, and what would: name the nested projects of an umbrella root. */
+  function noChecksNote(): string {
+    const dirs = s!.stored?.detected.monorepo?.dirs ?? [];
+    if (dirs.length > 1) return `(no checks at ${basename(s!.root)} itself; nested projects: ${dirs.join(", ")} \u2014 pass files inside one of them, or run from inside it)`;
+    return "(no applicable checks)";
   }
 
   pi.registerCommand("verify", {

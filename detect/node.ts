@@ -325,6 +325,9 @@ export function detectNode(b: Builder): void {
     else if (has("vue") && has("vue-tsc")) [r, source] = [bin("vue-tsc", ["--noEmit", "-p", "tsconfig.json"]), "vue-tsc"];
     else if (has("astro")) [r, source] = [bin("astro", ["check"]), "astro check"];
     else if (hasRefs && !hasOwnFiles) [r, source] = [bin("tsc", ["-b", "--noEmit"]), "tsconfig.json project references"];
+    // A workspace root's tsconfig without include/files/references is the base config the packages extend, not a
+    // project: `tsc -p` there compiles every package with the base options and reports thousands of bogus errors.
+    else if (workspaceGlobs && tsconfig && !hasOwnFiles) b.note("root tsconfig.json has no include/files/references — typecheck runs per package");
     else if (b.hasFile("tsconfig.json")) r = bin("tsc", noEmitOk ? ["--noEmit", "-p", "tsconfig.json"] : ["-b"]);
     if (r) {
       b.check({ id: "node:typecheck", tier: "fast", label: "typecheck", cmd: r.cmd, argv: r.argv, source, exts: tsExts, requires: r.requires, tool: "tsc", coversWorkspace: (!!workspaceGlobs && hasRefs && !hasOwnFiles) || undefined });

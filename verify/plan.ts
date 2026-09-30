@@ -50,6 +50,8 @@ export function buildPlan(
     mustRun?: PlannedCheck[];
     /** Run everything unscoped (manual /verify). */
     unscoped?: boolean;
+    /** Project dirs an unscoped run covers (default: the project root). */
+    roots?: string[];
   },
 ): Plan {
   const byTier = new Map<Tier, PlannedCheck[]>();
@@ -66,7 +68,7 @@ export function buildPlan(
   const stop = opts.gitRoot ?? opts.projectRoot;
   // group by project dir
   const groups = new Map<string, string[]>();
-  if (opts.unscoped) groups.set(opts.projectRoot, []);
+  if (opts.unscoped) for (const r of opts.roots ?? [opts.projectRoot]) groups.set(r, []);
   for (const f of relevant) {
     let dir = nearestProjectDir(f, stop);
     // never escape above the project root of the session unless the file lives outside it

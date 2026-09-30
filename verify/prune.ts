@@ -10,7 +10,9 @@ const DIAG_PATTERNS: RegExp[] = [
   /^\s*[^\s:]+:\d+:\d+:?\s+(error|warning|E|W|C|F|R|N)\b/i, // gcc/go/ruff/rubocop/shellcheck/flake8 style
   /^\s*[^\s:]+:\d+:\s+(error|warning|note):/i, // mypy
   /^\s*[^\s:]+:\d+:\d+\s+-\s+(error|warning)/i, // pyright
-  /^\s*\d+:\d+\s+(error|warning)\s/, // eslint stylish
+  /^\s*\d+:\d+\s+(error|warning)\b/i, // eslint stylish (`next lint` prints `Warning:`)
+  /^\s*\[(warn|error)\]\s+\S+$/, // prettier --check: one unformatted file per line
+  /^\s*\[warn\] Code style issues found in/, // prettier --check summary
   /^(error|warning)(\[[A-Z]\d+\])?:\s/, // cargo/rustc
   /^\s*-->\s+\S+:\d+:\d+/, // rustc location
   /^\s*(FAIL|FAILED|ERROR|✖|✗|×|✕|✘)\b/, // test runners
@@ -76,6 +78,24 @@ export function isDiagnosticLine(line: string): boolean {
   return DIAG_PATTERNS.some((re) => re.test(line)) && !NOISE_PATTERNS.some((re) => re.test(line));
 }
 
+const STYLISH_DIAG = /^\s*\d+:\d+\s+(error|warning)\b/i;
+/** A bare file path on its own line: the header eslint's stylish formatter prints above a file's `line:col` diagnostics. */
+const STYLISH_HEADER = /^\s*([A-Za-z]:)?[^\s:]+\.[A-Za-z0-9]{1,10}$/;
+
+/**
+ * Index of the file-header line for a stylish `line:col  error …` diagnostic at
+ * `i`, or undefined. The header sits above the block of diagnostics for that file.
+ */
+export function stylishHeader(lines: string[], i: number): number | undefined {
+  if (!STYLISH_DIAG.test(lines[i] ?? "")) return undefined;
+  for (let j = i - 1; j >= 0 && i - j <= 200; j--) {
+    const l = lines[j]!;
+    if (STYLISH_DIAG.test(l)) continue;
+    return STYLISH_HEADER.test(l) ? j : undefined;
+  }
+  return undefined;
+}
+
 /**
  * @param drop indices (into splitLines(text)) of diagnostic lines to leave out, with their
  *             context lines — used to hide failures that existed before the agent's change.
@@ -90,7 +110,8 @@ export function pruneOutput(text: string, maxLines = 40, opts: { drop?: Set<numb
   const diagIdx = allDiag.filter((i) => !drop.has(i));
   const files = new Set<string>();
   for (const i of diagIdx.slice(0, 50)) {
-    const m = all[i]!.match(/([^\s:()'"]+\.[A-Za-z0-9]{1,10})(?=[:(]\d)/);
+    const header = stylishHeader(all, i);
+    const m = header !== undefined ? all[header]!.match(/^\s*(\S+)$/) : all[i]!.match(/([^\s:()'"]+\.[A-Za-z0-9]{1,10})(?=[:(]\d)/);
     if (m) files.add(m[1]!);
   }
   let picked: string[] = [];
@@ -100,6 +121,9 @@ export function pruneOutput(text: string, maxLines = 40, opts: { drop?: Set<numb
     const CONTEXT_RE = /^\s*(-->|\d+\s*\||\|\s*[\^~-]|=\s+(help|note)|E\s|at |File "|\.\.\.)/;
     for (const i of diagIdx) {
       keep.add(i);
+      // eslint stylish: the file name is a header line above the block, not part of the diagnostic.
+      const header = stylishHeader(all, i);
+      if (header !== undefined) keep.add(header);
       // rustc/gcc/pytest style blocks: keep the snippet/context lines that follow (up to 8), skipping bare gutters.
       for (let j = 1; j <= 8 && i + j < all.length; j++) {
         const nx = all[i + j]!;
