@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.2.0 — 2026-09-30
+
 From a review of every gate failure in the author's own sessions: all of them were failures that existed before the task (a monorepo root `tsc` over 552 files, 805 lint warnings and 424 unformatted files on `main`, a stale `dist`), and the agent spent turns and `git stash` proving it.
 
 - **Baseline before the first write.** The agent's first read in a project directory starts that project's project-wide typecheck and lint once, in the background, on the untouched tree (the session root at the first prompt as well; at most four directories per session; workspace-wide scripts such as `turbo run lint` are not started this way). What fails there is the pre-existing baseline for the whole session, so the first prompt is no longer the one where every old failure is blamed on the agent. A run that finishes after a write, a shell change or a new prompt is discarded; a run stopped by the gate never marks a check as disabled. The user sees `already fails on the untouched tree (N diagnostics)` once; the agent sees `no new failures` instead of a repair round.
