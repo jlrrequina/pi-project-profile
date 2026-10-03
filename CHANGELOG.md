@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.3.0 — 2026-10-03
+
 - `/profile` now shows `disabled this session: <reason>` next to a check the gate disabled. The report looked the check up by id while the gate stores `id@cwd` (the doctor already used the right key), so the annotation never appeared.
 - A check the gate cannot run (tool missing, dependencies not installed, timeout) is now reported to the model once per session as a `[verification]` message, not only as a UI toast the model never sees. Before, the model kept the prompt's promise that the check runs automatically and could report success without any check having run.
 - The prompt section's `Verification:` line no longer promises checks that cannot run yet. When every automatic check is unavailable (typically before the first install), it names the commands and the reason instead of "runs … automatically".
