@@ -45,6 +45,11 @@ export interface ScopeSpec {
   cmd?: string;
 }
 
+/** Session-wide identity of a check: the id is unique per project dir, so the dir is part of the key. */
+export function checkKey(c: Pick<Check, "id" | "cwd">): string {
+  return `${c.id}@${c.cwd}`;
+}
+
 export interface Check {
   /** Stable id, e.g. "node:typecheck", "cargo:check". Unique per project dir. */
   id: string;

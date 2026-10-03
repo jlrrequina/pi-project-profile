@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { sha1 } from "../fs-utils.ts";
 import { availability } from "../profile/render.ts";
 import type { Check, CheckRun, GateVerdict, ProfileConfig, Tier } from "../types.ts";
-import { TIER_POLICY } from "../types.ts";
+import { checkKey, TIER_POLICY } from "../types.ts";
 import { analyzeDiagnostics, diagCount, splitByBaseline, type DiagSet } from "./baseline.ts";
 import { classifyFailure } from "./classify.ts";
 import type { Plan, PlannedCheck } from "./plan.ts";
@@ -144,7 +144,7 @@ export async function runGate(plan: Plan, config: ProfileConfig, hooks: GateHook
   const runs: CheckRun[] = [];
   let red = false;
   for (const tier of TIER_ORDER) {
-    const planned = (plan.byTier.get(tier) ?? []).filter((p) => !hooks.broken.has(p.check.id + "@" + p.check.cwd));
+    const planned = (plan.byTier.get(tier) ?? []).filter((p) => !hooks.broken.has(checkKey(p.check)));
     if (planned.length === 0) continue;
     if (hooks.signal?.aborted) break;
     if (TIER_POLICY[tier] === "confirm") {
@@ -161,7 +161,7 @@ export async function runGate(plan: Plan, config: ProfileConfig, hooks: GateHook
       const run = results[i];
       if (!run) continue;
       runs.push(run);
-      if (run.status === "env") hooks.broken.set(planned[i]!.check.id + "@" + planned[i]!.check.cwd, run.reason ?? "environment failure");
+      if (run.status === "env") hooks.broken.set(checkKey(planned[i]!.check), run.reason ?? "environment failure");
       if (run.status === "fail") red = true;
     }
     if (red && hooks.stopOnRed !== false) break;

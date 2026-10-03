@@ -8,7 +8,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tildify } from "../fs-utils.ts";
-import type { Check, StoredProfile } from "../types.ts";
+import { checkKey, type Check, type StoredProfile } from "../types.ts";
 import { availability, effectiveCommands } from "./render.ts";
 
 type V = [number, number, number];
@@ -142,7 +142,7 @@ export function doctorReport(stored: StoredProfile, checks: Check[], broken: Map
   if (checks.length === 0) out.push("- (none detected)");
   for (const c of checks) {
     const where = c.cwd === d.root ? "" : ` · in ${tildify(c.cwd)}`;
-    const disabled = broken.get(c.id + "@" + c.cwd);
+    const disabled = broken.get(checkKey(c));
     const missing = availability(c);
     if (disabled) out.push(`- ⚠ ${c.label} \`${c.cmd}\`${where} — disabled this session: ${disabled}`);
     else if (missing) {

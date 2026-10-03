@@ -364,10 +364,10 @@ test("run_checks declares annotations and returns structured content for program
 });
 
 /** A project whose typecheck script prints one tsc-style diagnostic and fails. */
-function failingProject(root: string, extra: Record<string, string> = {}, message = "Type string is not assignable to type number", onlyWhenEdited = false) {
-  const guard = onlyWhenEdited ? "if (!require('fs').existsSync('src/a.ts')) process.exit(0); " : "";
-  const typecheck = `node -e "${guard}console.error('src/a.ts(1,1): error TS2322: ${message}.'); process.exit(2)"`;
-  write(root, "package.json", JSON.stringify({ name: "demo", scripts: { typecheck, ...extra } }));
+function failingProject(root: string, opts: { scripts?: Record<string, string>; message?: string; onlyWhenEdited?: boolean } = {}) {
+  const guard = opts.onlyWhenEdited ? "if (!require('fs').existsSync('src/a.ts')) process.exit(0); " : "";
+  const typecheck = `node -e "${guard}console.error('src/a.ts(1,1): error TS2322: ${opts.message ?? "Type string is not assignable to type number"}.'); process.exit(2)"`;
+  write(root, "package.json", JSON.stringify({ name: "demo", scripts: { typecheck, ...opts.scripts } }));
   write(root, "package-lock.json", "{}");
   write(root, "tsconfig.json", "{}");
   mkdirSync(join(root, "node_modules"), { recursive: true });
@@ -382,6 +382,9 @@ async function editFile(x: Awaited<ReturnType<typeof load>>, ctx: any, root: str
 }
 
 const kinds = (r: any) => (r?.entries ?? []).map((e: any) => e.details?.kind ?? e.type);
+
+/** The background baseline of the untouched tree has reported through the status line and finished. */
+const baselineSettled = (x: Awaited<ReturnType<typeof load>>) => until(() => x.statuses.some((t) => t.startsWith("\u23f3 baseline")) && !x.statuses.at(-1)!.startsWith("\u23f3"));
 
 test("/profile subcommands persist user data the next prompt and report reflect", async () => {
   const x = await load();
@@ -435,7 +438,7 @@ test("/profile subcommands persist user data the next prompt and report reflect"
 test("/verify runs one tier on demand, hands a red result to the model without a turn, and can be cancelled", async () => {
   const x = await load();
   const root = tmp();
-  failingProject(root, { lint: `node -e "console.error('src/a.ts:1:1: error no-unused-vars x is defined but never used'); process.exit(1)"` });
+  failingProject(root, { scripts: { lint: `node -e "console.error('src/a.ts:1:1: error no-unused-vars x is defined but never used'); process.exit(1)"` } });
   const ctx = x.ctxFor(root);
   await x.emit("session_start", {}, ctx);
   await x.command("/verify lint", ctx);
@@ -455,13 +458,12 @@ test("per-turn checks: fast tiers only, a note without `continue`, and the earli
   const x = await load();
   write(x.agent, "project-profile/config.json", JSON.stringify({ verify: { perTurn: true } }));
   const root = tmp();
-  failingProject(root, { test: `node -e "require('fs').writeFileSync('TESTS_RAN', '')"` }, undefined, true);
+  failingProject(root, { scripts: { test: `node -e "require('fs').writeFileSync('TESTS_RAN', '')"` }, onlyWhenEdited: true });
   const branch: any[] = [];
   const ctx = { ...x.ctxFor(root), sessionManager: { getBranch: () => branch } };
   await x.emit("session_start", {}, ctx);
   await x.emit("before_agent_start", prompt(), ctx);
-  // the untouched-tree baseline runs in the background; per-turn checks wait for it, so the test does too
-  await until(() => x.statuses.some((t) => t.startsWith("\u23f3 baseline")) && !x.statuses.at(-1)!.startsWith("\u23f3"));
+  await baselineSettled(x);
   await editFile(x, ctx, root, "src/a.ts", "export const a = 1;\n");
   const first = await x.emit("turn_end", { outcome: "completed", entries: [], turnIndex: 0 }, ctx);
   assert.equal(first?.continue, undefined, "the agent is still working: never asked to continue");
@@ -501,8 +503,7 @@ test("repair loop stops when the same failure repeats, and when the rounds are e
   await y.emit("before_agent_start", prompt(), ctx2);
   await editFile(y, ctx2, root, "src/a.ts", "export const a = 3;\n");
   assert.equal((await y.emit("agent_before_settle", settle(), ctx2))?.continue, true);
-  // a different failure the second time: not "repeated", but round 2 of max 1
-  failingProject(root, {}, "Property x does not exist");
+  failingProject(root, { message: "Property x does not exist" });
   await editFile(y, ctx2, root, "src/a.ts", "export const a = 4;\n");
   const last = await y.emit("agent_before_settle", settle(), ctx2);
   assert.deepEqual(kinds(last), ["giveup"]);

@@ -19,7 +19,7 @@ import { detectProject, findProjectRoot } from "../detect/index.ts";
 import { renderPromptSection } from "../profile/render.ts";
 import { emptyUserData } from "../profile/store.ts";
 import type { DetectedProfile, StoredProfile } from "../types.ts";
-import { TIER_POLICY } from "../types.ts";
+import { checkKey, TIER_POLICY } from "../types.ts";
 
 interface Entry {
   repo: string;
@@ -62,7 +62,7 @@ export function invariants(p: DetectedProfile, section: string, again: DetectedP
   if (p.languages.length === 0) errors.push("no language detected");
   const seen = new Set<string>();
   for (const c of p.checks) {
-    const key = `${c.id}@${c.cwd}`;
+    const key = checkKey(c);
     if (seen.has(key)) errors.push(`duplicate check ${key}`);
     seen.add(key);
     if (!c.cmd || c.argv.length === 0) errors.push(`check ${c.id} has no command`);

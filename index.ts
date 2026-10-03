@@ -23,7 +23,7 @@ import { findProjectRoot, nearestProjectDir } from "./detect/index.ts";
 import { exists, ext, readText, realpath, tildify, uniq } from "./fs-utils.ts";
 import { availability, effectiveChecks, effectiveCommands, renderPromptSection, renderReport, tierAllowed } from "./profile/render.ts";
 import { deleteStored, loadOrDetect, profilePath, pruneProfiles, updateUser } from "./profile/store.ts";
-import type { Check, GateVerdict, ProfileConfig, StoredProfile, Tier } from "./types.ts";
+import { checkKey, type Check, type GateVerdict, type ProfileConfig, type StoredProfile, type Tier } from "./types.ts";
 import { collectChanges, displayPath, newTracker, peekChanges, snapshotStart, toolPath, type ChangeTracker } from "./verify/changes.ts";
 import { describeRuns, runGate, type GateHooks } from "./verify/gate.ts";
 import { buildPlan, isIgnoredPath, TIER_ORDER, type PlannedCheck } from "./verify/plan.ts";
@@ -169,7 +169,7 @@ export default function projectProfile(pi: ExtensionAPI) {
   function makeHooks(ctx: ExtensionContext, signal: AbortSignal, opts: { interactive: boolean; baseline?: boolean }): GateHooks {
     return {
       broken: s!.broken,
-      baseline: opts.baseline === false ? undefined : (check) => s!.promptBaseline.get(check.id + "@" + check.cwd),
+      baseline: opts.baseline === false ? undefined : (check) => s!.promptBaseline.get(checkKey(check)),
       signal,
       progress: (t) => setStatus(ctx, `⏳ ${t}`),
       permission: async (tier, planned) => {
@@ -220,13 +220,12 @@ export default function projectProfile(pi: ExtensionAPI) {
   function reportEnvFailures(ctx: ExtensionContext, verdict: GateVerdict) {
     for (const r of verdict.runs) {
       if (r.status !== "env") continue;
-      const key = r.check.id + "@" + r.check.cwd;
+      const key = checkKey(r.check);
       if (s!.notifiedBroken.has(key)) continue;
       s!.notifiedBroken.add(key);
       const cmd = r.check.cmd.replace(" <files>", "");
       const log = r.logPath ? ` · log: ${tildify(r.logPath)}` : "";
       notify(ctx, `verify: ${r.check.label} (\`${cmd}\`) disabled this session — ${r.reason}${log}`, "warning");
-      // the toast never reaches the model, which was promised this check in the prompt section
       pi.sendMessage(
         { customType: VERIFY_MSG, content: `[verification] ${r.check.label} (\`${cmd}\`) could not run and is disabled for this session — ${r.reason}${log}. Nothing verified ${r.check.label} for you: do not assume it passes.`, display: true, details: { seq: -1, kind: "env", headline: `${r.check.label} unavailable: ${r.reason}` } },
         { triggerTurn: false },
@@ -238,7 +237,7 @@ export default function projectProfile(pi: ExtensionAPI) {
   function recordDiag(verdict: GateVerdict) {
     for (const r of verdict.runs) {
       if (!r.diag || r.scoped) continue;
-      if (r.status === "pass" || r.status === "fail" || r.status === "preexisting") s!.lastDiag.set(r.check.id + "@" + r.check.cwd, r.diag);
+      if (r.status === "pass" || r.status === "fail" || r.status === "preexisting") s!.lastDiag.set(checkKey(r.check), r.diag);
     }
   }
 
@@ -255,7 +254,7 @@ export default function projectProfile(pi: ExtensionAPI) {
     const stored = profileFor(projectDir);
     if (!stored) return;
     // Workspace-wide runs (turbo, pnpm -r) fan out over every package: too much background work for a guess.
-    const eligible = (c: Check) => (c.tier === "fast" || c.tier === "lint") && !c.appendFiles && !c.coversWorkspace && !st.lastDiag.has(c.id + "@" + c.cwd);
+    const eligible = (c: Check) => (c.tier === "fast" || c.tier === "lint") && !c.appendFiles && !c.coversWorkspace && !st.lastDiag.has(checkKey(c));
     const plan = buildPlan([], { projectRoot: projectDir, gitRoot: st.gitRoot, ignoreDirs: st.config.ignoreDirs, profileFor, checksFor: (p) => effectiveChecks(p).filter(eligible), unscoped: true });
     if (TIER_ORDER.every((t) => (plan.byTier.get(t)?.length ?? 0) === 0)) return;
     const seq = st.prompt.seq;
@@ -280,7 +279,7 @@ export default function projectProfile(pi: ExtensionAPI) {
       recordDiag(verdict);
       for (const r of verdict.runs) {
         if (!r.diag || r.scoped) continue;
-        const key = r.check.id + "@" + r.check.cwd;
+        const key = checkKey(r.check);
         st.promptBaseline.set(key, r.diag);
         if (r.status !== "fail" || st.notifiedKnown.has(key)) continue;
         st.notifiedKnown.add(key);
@@ -407,7 +406,7 @@ export default function projectProfile(pi: ExtensionAPI) {
     if (known.length === 0) return undefined;
     const parts = known.map((r) => `${r.check.label}${whereOf(r.check.cwd)} (${r.preexisting} known)`);
     for (const r of known) {
-      const key = r.check.id + "@" + r.check.cwd;
+      const key = checkKey(r.check);
       if (s!.notifiedKnown.has(key)) continue;
       s!.notifiedKnown.add(key);
       notify(ctx, `verify: ${r.check.label}${whereOf(r.check.cwd)} still reports ${r.preexisting} failure${r.preexisting === 1 ? "" : "s"} that existed before this task — not sent to the agent`, "info");

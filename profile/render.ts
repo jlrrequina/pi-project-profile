@@ -3,7 +3,7 @@ import { dirname, join } from "node:path";
 import { tildify } from "../fs-utils.ts";
 import { resolveArgv } from "../verify/resolve.ts";
 import type { Check, ProfileConfig, StoredProfile, Tier } from "../types.ts";
-import { TIER_POLICY } from "../types.ts";
+import { checkKey, TIER_POLICY } from "../types.ts";
 
 /** Commands after applying user overrides (null = disabled). */
 export function effectiveCommands(stored: StoredProfile): Record<string, { cmd: string; source: string }> {
@@ -188,7 +188,7 @@ export function renderReport(stored: StoredProfile, config: ProfileConfig, opts:
   if (checks.length === 0) out.push("(none detected — use `/profile set test <cmd>` etc.)");
   for (const c of checks) {
     const policy = TIER_POLICY[c.tier] === "auto" ? "auto" : `${tierAllowed(c.tier, stored, config)} (confirm-once tier)`;
-    const broken = opts.brokenChecks.get(c.id + "@" + c.cwd);
+    const broken = opts.brokenChecks.get(checkKey(c));
     const avail = availability(c);
     out.push(`- **${c.label}** [${c.tier}] \`${c.cmd}\` — in ${tildify(c.cwd)} · from ${c.source} · policy: ${policy}${c.exts?.length ? ` · when: ${c.exts.join(" ")}` : ""}${avail ? ` · **unavailable: ${avail}**` : ""}${broken ? ` · **disabled this session: ${broken}**` : ""}`);
   }

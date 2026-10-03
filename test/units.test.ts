@@ -9,7 +9,7 @@ import { detectProject, findProjectRoot, nearestProjectDir } from "../detect/ind
 import { clearWhichCache, executableCandidates, expandDirGlob, findNodeBin, stripJsonComments } from "../fs-utils.ts";
 import { effectiveChecks, renderPromptSection, renderReport, tierAllowed } from "../profile/render.ts";
 import { emptyUserData, isStale, loadOrDetect, updateUser } from "../profile/store.ts";
-import { DEFAULT_CONFIG, type Check, type StoredProfile } from "../types.ts";
+import { checkKey, DEFAULT_CONFIG, type Check, type StoredProfile } from "../types.ts";
 import { classifyFailure } from "../verify/classify.ts";
 import { buildPlan, isDocOnly, TIER_ORDER, type Plan } from "../verify/plan.ts";
 import { pruneOutput, splitLines, stylishHeader } from "../verify/prune.ts";
@@ -326,8 +326,7 @@ test("/profile report names a check the gate disabled this session", () => {
   write(root, "package.json", JSON.stringify({ name: "x", scripts: { test: "vitest run" }, devDependencies: { vitest: "2" } }));
   const stored: StoredProfile = { detected: detectProject(root, config), user: emptyUserData(), updatedAt: "t" };
   const check = effectiveChecks(stored).find((c) => c.id === "node:test")!;
-  // the gate keys broken checks by id@cwd (verify/gate.ts), the doctor reads the same key
-  const brokenChecks = new Map([[`${check.id}@${check.cwd}`, "command not found / not executable"]]);
+  const brokenChecks = new Map([[checkKey(check), "command not found / not executable"]]);
   const report = renderReport(stored, config, { verifyEnabled: true, cachePath: join(root, "cache.json"), brokenChecks });
   assert.ok(report.includes("disabled this session: command not found / not executable"), report);
   rmSync(root, { recursive: true, force: true });
