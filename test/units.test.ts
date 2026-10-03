@@ -212,19 +212,19 @@ test("findProjectRoot never resolves to the home directory (stray ~/package.json
     mkdirSync(join(fakeHome, "Documents/Code/wrapper/app"), { recursive: true });
     // no manifest, no git: stays at cwd instead of climbing to ~
     const r1 = findProjectRoot(join(fakeHome, "Documents/Code/wrapper"));
-    assert.equal(r1.root, join(realpathOf(fakeHome), "Documents/Code/wrapper"));
+    assert.equal(r1.root, join(real(fakeHome), "Documents/Code/wrapper"));
     assert.equal(r1.gitRoot, undefined);
     // a manifest below home still wins
     write(fakeHome, "Documents/Code/wrapper/app/package.json", "{}");
     const r2 = findProjectRoot(join(fakeHome, "Documents/Code/wrapper/app/src".replace("/src", "")));
-    assert.equal(r2.root, join(realpathOf(fakeHome), "Documents/Code/wrapper/app"));
+    assert.equal(r2.root, join(real(fakeHome), "Documents/Code/wrapper/app"));
     // dotfiles repo at ~ is ignored as a git root
     mkdirSync(join(fakeHome, ".git"));
     const r3 = findProjectRoot(join(fakeHome, "Documents/Code/wrapper"));
     assert.equal(r3.gitRoot, undefined);
-    assert.equal(r3.root, join(realpathOf(fakeHome), "Documents/Code/wrapper"));
+    assert.equal(r3.root, join(real(fakeHome), "Documents/Code/wrapper"));
     // cwd == home itself is left alone (user's explicit choice)
-    assert.equal(findProjectRoot(fakeHome).root, realpathOf(fakeHome));
+    assert.equal(findProjectRoot(fakeHome).root, real(fakeHome));
   } finally {
     process.env.HOME = prevHome;
     if (prevProfile === undefined) delete process.env.USERPROFILE;
@@ -233,10 +233,6 @@ test("findProjectRoot never resolves to the home directory (stray ~/package.json
   }
 });
 
-function realpathOf(p: string): string {
-  const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
-  return fs.realpathSync(p);
-}
 
 // ---------------------------------------------------------------- store
 test("cache round-trip, staleness, user data survives re-detect", () => {

@@ -20,7 +20,7 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { agentDir, configPath, loadConfig, writeDefaultConfig } from "./config.ts";
 import { findProjectRoot, nearestProjectDir } from "./detect/index.ts";
-import { ext, realpath, tildify, uniq } from "./fs-utils.ts";
+import { exists, ext, readText, realpath, tildify, uniq } from "./fs-utils.ts";
 import { availability, effectiveChecks, effectiveCommands, renderPromptSection, renderReport, tierAllowed } from "./profile/render.ts";
 import { deleteStored, loadOrDetect, profilePath, pruneProfiles, updateUser } from "./profile/store.ts";
 import type { Check, GateVerdict, ProfileConfig, StoredProfile, Tier } from "./types.ts";
@@ -33,11 +33,10 @@ import { collectFindings, formatFinding, headContent, isWeakening, mustFix, read
 import { fixHint } from "./verify/hints.ts";
 import { doctorReport } from "./profile/doctor.ts";
 import { discoverRules, generatedPatterns, generatedReason, matchingRules, nestedInstructionFiles, readInstruction, renderInjection, type InjectionPart, type ScopedRule } from "./profile/scoped.ts";
-import { readFileSync, statSync } from "node:fs";
+import { appendFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 import { spawnSync } from "node:child_process";
-import { appendFileSync } from "node:fs";
 
 const VERIFY_MSG = "project-profile/verify";
 const DEBUG = !!process.env.PI_PROJECT_PROFILE_DEBUG;
@@ -122,21 +121,6 @@ interface SessionState {
   hasUI: boolean;
 }
 
-function readTextSafe(p: string): string | undefined {
-  try {
-    return readFileSync(p, "utf8");
-  } catch {
-    return undefined;
-  }
-}
-
-function readHead(p: string): string | undefined {
-  try {
-    return readFileSync(p, "utf8").slice(0, 2000);
-  } catch {
-    return undefined;
-  }
-}
 
 export default function projectProfile(pi: ExtensionAPI) {
   let s: SessionState | undefined;
@@ -557,7 +541,7 @@ export default function projectProfile(pi: ExtensionAPI) {
       baselines: new Map(),
       rules: discoverRules(uniq([root, gitRoot ?? root])),
       injected: new Set(),
-      genPatterns: generatedPatterns(readTextSafe(join(gitRoot ?? root, ".gitattributes"))),
+      genPatterns: generatedPatterns(readText(join(gitRoot ?? root, ".gitattributes"))),
       generatedWarned: new Set(),
       mode: ctx.mode,
       hasUI: ctx.hasUI,
@@ -611,14 +595,13 @@ export default function projectProfile(pi: ExtensionAPI) {
       if (s.stored) startBaseline(ctx, s.root);
     }
     if (!s.config.profile.inject || !s.stored) return;
-    const loaded = (event.systemPromptOptions.contextFiles ?? []).map((f) => f.path);
+    const loaded = event.systemPromptOptions.contextFiles.map((f) => f.path);
     const key = `${s.stored.updatedAt}|${verifyEnabled()}|${loaded.join(",")}`;
     if (s.renderedKey !== key || !s.renderedSection) {
       s.renderedSection = renderPromptSection(s.stored, s.config, { verifyEnabled: verifyEnabled(), piLoadedContextFiles: loaded });
       s.renderedKey = key;
     }
     event.systemPromptOptions.sections["project_profile"] = s.renderedSection;
-    void ctx;
   });
 
   // ------------------------------------------------------------------ change tracking
@@ -677,7 +660,7 @@ export default function projectProfile(pi: ExtensionAPI) {
     // Generated files: hand edits are overwritten on regeneration.
     if (mutation && st.config.verify.guard && !st.generatedWarned.has(abs)) {
       const orig = st.prompt.orig.get(given) ?? st.prompt.orig.get(abs);
-      const head = typeof orig === "string" && orig !== SKIP ? orig.slice(0, 2000) : readHead(abs);
+      const head = typeof orig === "string" && orig !== SKIP ? orig.slice(0, 2000) : readText(abs, 2000);
       const reason = generatedReason(display(abs), head, st.genPatterns);
       if (reason) {
         st.generatedWarned.add(abs);
@@ -1117,9 +1100,9 @@ export default function projectProfile(pi: ExtensionAPI) {
           const p = configPath(dir);
           try {
             const { issues } = loadConfig(dir);
-            const exists = (await import("node:fs")).existsSync(p);
-            const created = exists ? p : writeDefaultConfig(dir);
-            notify(ctx, `${exists ? "config" : "created default config"}: ${tildify(created)}${issues.length ? ` — issues: ${issues.join("; ")}` : ""}`, "info");
+            const present = exists(p);
+            const created = present ? p : writeDefaultConfig(dir);
+            notify(ctx, `${present ? "config" : "created default config"}: ${tildify(created)}${issues.length ? ` — issues: ${issues.join("; ")}` : ""}`, "info");
           } catch (err) {
             notify(ctx, `project-profile: ${(err as Error).message}`, "error");
           }

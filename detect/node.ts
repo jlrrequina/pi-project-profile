@@ -224,7 +224,7 @@ export function detectNode(b: Builder): void {
     }
   }
   if (has("react") && !has("next") && !has("react-native") && (has("vite") || has("@vitejs/plugin-react"))) b.add("Vite+React");
-  if (Object.keys(scripts).some((s) => /node --test|node --test\b/.test(scripts[s]!)) && !has("vitest") && !has("jest")) b.add("node:test");
+  if (Object.keys(scripts).some((s) => /node --test\b/.test(scripts[s]!)) && !has("vitest") && !has("jest")) b.add("node:test");
   if (pm === "bun" && Object.values(scripts).some((s) => /\bbun test\b/.test(s))) b.add("bun test");
 
   // ---- conventions ----

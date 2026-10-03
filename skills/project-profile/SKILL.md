@@ -70,7 +70,7 @@ The model cannot invoke slash commands. When configuration must change, give the
 | `/profile doctor` | Required vs installed runtimes, tool and dependency availability, and the commands that would fix them (never run automatically). |
 | `/profile refresh` | Re-detect now (also happens automatically when a manifest changes) and clear the "disabled this session" list. |
 | `/profile set <key> <cmd>` | Override `typecheck`, `lint`, `format`, `test`, `build`, `dev`, `generate`, …; `-` disables that key. Runs via `sh -c` from the project root. |
-| `/profile note <text>` · `/profile notes clear` | Persist a per-repo note that appears under `Notes:` in the profile. |
+| `/profile note <text>` · `/profile notes` · `/profile notes clear` | Persist a per-repo note that appears under `Notes:` in the profile; list the notes; drop them. |
 | `/profile tests allow\|deny\|ask` · `/profile build allow\|deny\|ask` | Permission for the test and build tiers in this repo. |
 | `/profile verify on\|off\|default` | Per-repo switch for the gate (`default` follows the global config). |
 | `/profile forget` | Drop the cache and per-repo user data, then re-detect. |

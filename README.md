@@ -97,7 +97,7 @@ Secrets, stale lockfiles and `.only` get one follow-up turn; weakening added whi
 | `/profile doctor` | required vs installed runtimes, tool and dependency availability, fix commands (never run) |
 | `/profile refresh` | re-detect (also automatic when a manifest changes) |
 | `/profile set <key> <cmd>` | override `typecheck`, `lint`, `test`, `build`, … (`-` disables) |
-| `/profile note <text>` | persist a per-repo note for the agent |
+| `/profile note <text>` | persist a per-repo note for the agent (`/profile notes` lists them, `/profile notes clear` drops them) |
 | `/profile tests allow\|deny\|ask` | test-tier permission (same for `build`) |
 | `/profile verify on\|off` | per-repo switch for the gate |
 | `/profile forget` | drop cache and user data for this repo |

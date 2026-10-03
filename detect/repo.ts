@@ -326,7 +326,7 @@ export function detectRepoShape(b: Builder, gitRoot: string | undefined): { layo
       for (const f of files) {
         const dot = f.lastIndexOf(".");
         const slash = f.lastIndexOf("/");
-        if (dot <= slash + 0 || dot < 0) continue;
+        if (dot <= slash || dot < 0) continue;
         const e = f.slice(dot).toLowerCase();
         if (e.length > 8) continue;
         extCounts[e] = (extCounts[e] ?? 0) + 1;

@@ -42,11 +42,6 @@ export function toolPath(cwd: string, path: unknown): string | undefined {
   return physicalPath(isAbsolute(path) ? resolve(path) : resolve(cwd, path));
 }
 
-export function trackToolWrite(t: ChangeTracker, cwd: string, path: unknown): void {
-  const p = toolPath(cwd, path);
-  if (p) t.tracked.add(p);
-}
-
 function gitStatus(gitRoot: string, signal?: AbortSignal): Promise<Snapshot | undefined> {
   return new Promise((resolvePromise) => {
     let out = "";

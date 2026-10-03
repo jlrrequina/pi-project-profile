@@ -70,9 +70,7 @@ export function buildPlan(
   const groups = new Map<string, string[]>();
   if (opts.unscoped) for (const r of opts.roots ?? [opts.projectRoot]) groups.set(r, []);
   for (const f of relevant) {
-    let dir = nearestProjectDir(f, stop);
-    // never escape above the project root of the session unless the file lives outside it
-    if (!f.startsWith(opts.projectRoot + sep) && f !== opts.projectRoot) dir = nearestProjectDir(f, stop);
+    const dir = nearestProjectDir(f, stop);
     if (!groups.has(dir)) groups.set(dir, []);
     groups.get(dir)!.push(f);
   }

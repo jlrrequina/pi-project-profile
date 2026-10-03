@@ -1,7 +1,7 @@
 /**
  * Dev CLI: print the detected profile for one or more directories.
  *
- *   node scripts/scan.ts <dir> [<dir>…] [--json] [--prompt] [--checks]
+ *   node scripts/scan.ts <dir> [<dir>…] [--json] [--checks]
  */
 import { resolve } from "node:path";
 import { loadConfig } from "../config.ts";
@@ -14,7 +14,7 @@ const args = process.argv.slice(2);
 const flags = new Set(args.filter((a) => a.startsWith("--")));
 const dirs = args.filter((a) => !a.startsWith("--"));
 if (dirs.length === 0) {
-  console.error("usage: scan.ts <dir>… [--json] [--prompt] [--checks]");
+  console.error("usage: scan.ts <dir>… [--json] [--checks]");
   process.exit(2);
 }
 const { config } = loadConfig();

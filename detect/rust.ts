@@ -53,12 +53,10 @@ export function detectRust(b: Builder): void {
 
   let members: string[] = [];
   if (isWorkspace) {
-    const ws = sections.get("workspace");
     const raw = cargo?.match(/^\s*members\s*=\s*\[([^\]]*)\]/ms)?.[1] ?? "";
     members = Array.from(raw.matchAll(/"([^"]+)"/g)).map((m) => m[1]!);
     b.add(`cargo workspace${members.length ? ` (${members.length} member globs)` : ""}`);
     b.monorepo = { kind: "cargo workspace", packages: members.length || undefined };
-    void ws;
   }
   const deps = [
     ...tomlKeys(cargo, "dependencies"),

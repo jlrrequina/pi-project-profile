@@ -22,12 +22,11 @@ export function effectiveChecks(stored: StoredProfile): Check[] {
   const out: Check[] = [];
   const overridden = new Set<string>();
   for (const [k, v] of Object.entries(stored.user.overrides)) {
-    const label = k === "typecheck" ? "typecheck" : k;
     const tier: Tier | undefined = k === "typecheck" ? "fast" : k === "lint" ? "lint" : k === "test" ? "test" : k === "build" ? "build" : k === "format" ? "lint" : undefined;
     if (!tier) continue;
-    overridden.add(label);
+    overridden.add(k);
     if (v === null) continue;
-    out.push({ id: `user:${k}`, tier, label, cmd: v, argv: ["sh", "-c", v], viaShell: true, cwd: stored.detected.root, source: "user override", requires: {}, tool: "generic" });
+    out.push({ id: `user:${k}`, tier, label: k, cmd: v, argv: ["sh", "-c", v], viaShell: true, cwd: stored.detected.root, source: "user override", requires: {}, tool: "generic" });
   }
   for (const c of checks) if (!overridden.has(c.label)) out.push(c);
   return out;
