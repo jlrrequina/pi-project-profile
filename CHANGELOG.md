@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- `/profile` now shows `disabled this session: <reason>` next to a check the gate disabled. The report looked the check up by id while the gate stores `id@cwd` (the doctor already used the right key), so the annotation never appeared.
+- Detection: a `run:` step that continues a command with a trailing backslash (`cargo clippy \` + `--all-targets -- -D warnings`) is one command now. Before, the first line alone became the CI run and a lint check that could not execute. `DETECTOR_VERSION` 14.
+
 ## 1.2.0 — 2026-09-30
 
 From a review of every gate failure in the author's own sessions: all of them were failures that existed before the task (a monorepo root `tsc` over 552 files, 805 lint warnings and 424 unformatted files on `main`, a stale `dist`), and the agent spent turns and `git stash` proving it.

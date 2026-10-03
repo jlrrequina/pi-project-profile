@@ -136,7 +136,7 @@ export function detectCI(b: Builder): { provider: string; files: string[]; runs:
       b.fingerprintFiles.add(`.github/workflows/${f}`);
       collect(text, /^\s*(?:-\s*)?run:\s*(.+)$/gm);
       // multi-line run: |
-      for (const block of text.matchAll(/run:\s*[|>]-?\s*\n((?:[ \t]+[^\n]*\n?)+)/g)) collect(block[1]!.replace(/^[ \t]+/gm, ""), /^(.+)$/gm);
+      for (const block of text.matchAll(/run:\s*[|>]-?\s*\n((?:[ \t]+[^\n]*\n?)+)/g)) collect(block[1]!.replace(/^[ \t]+/gm, "").replace(/\s*\\\n\s*/g, " "), /^(.+)$/gm);
     }
   }
   const gl = b.text(".gitlab-ci.yml");

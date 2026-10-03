@@ -184,7 +184,7 @@ export function renderReport(stored: StoredProfile, config: ProfileConfig, opts:
   if (checks.length === 0) out.push("(none detected — use `/profile set test <cmd>` etc.)");
   for (const c of checks) {
     const policy = TIER_POLICY[c.tier] === "auto" ? "auto" : `${tierAllowed(c.tier, stored, config)} (confirm-once tier)`;
-    const broken = opts.brokenChecks.get(c.id);
+    const broken = opts.brokenChecks.get(c.id + "@" + c.cwd);
     const avail = availability(c);
     out.push(`- **${c.label}** [${c.tier}] \`${c.cmd}\` — in ${tildify(c.cwd)} · from ${c.source} · policy: ${policy}${c.exts?.length ? ` · when: ${c.exts.join(" ")}` : ""}${avail ? ` · **unavailable: ${avail}**` : ""}${broken ? ` · **disabled this session: ${broken}**` : ""}`);
   }

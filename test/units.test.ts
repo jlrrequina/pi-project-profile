@@ -7,7 +7,7 @@ import { loadConfig } from "../config.ts";
 import { composeServices, parseToolVersions, tomlHasTable, tomlKeys, tomlSections } from "../detect/context.ts";
 import { detectProject, findProjectRoot, nearestProjectDir } from "../detect/index.ts";
 import { clearWhichCache, executableCandidates, expandDirGlob, findNodeBin, stripJsonComments } from "../fs-utils.ts";
-import { effectiveChecks, renderPromptSection, tierAllowed } from "../profile/render.ts";
+import { effectiveChecks, renderPromptSection, renderReport, tierAllowed } from "../profile/render.ts";
 import { emptyUserData, isStale, loadOrDetect, updateUser } from "../profile/store.ts";
 import { DEFAULT_CONFIG, type Check, type StoredProfile } from "../types.ts";
 import { classifyFailure } from "../verify/classify.ts";
@@ -291,6 +291,30 @@ test("prompt section is static and bounded", () => {
   // π reports loaded context files as OS paths (backslashes on Windows): still recognised, not inlined twice
   const win = renderPromptSection(stored, config, { verifyEnabled: true, piLoadedContextFiles: ["C:\\work\\x\\.cursorrules"] });
   assert.ok(win.includes(".cursorrules (loaded)") && !win.includes("### .cursorrules"));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("/profile report names a check the gate disabled this session", () => {
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "x", scripts: { test: "vitest run" }, devDependencies: { vitest: "2" } }));
+  const stored: StoredProfile = { detected: detectProject(root, config), user: emptyUserData(), updatedAt: "t" };
+  const check = effectiveChecks(stored).find((c) => c.id === "node:test")!;
+  // the gate keys broken checks by id@cwd (verify/gate.ts), the doctor reads the same key
+  const brokenChecks = new Map([[`${check.id}@${check.cwd}`, "command not found / not executable"]]);
+  const report = renderReport(stored, config, { verifyEnabled: true, cachePath: join(root, "cache.json"), brokenChecks });
+  assert.ok(report.includes("disabled this session: command not found / not executable"), report);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("CI run steps with backslash line continuations are one command", () => {
+  const root = tmp();
+  write(root, "Cargo.toml", '[package]\nname = "x"\nversion = "0.1.0"\nedition = "2021"\n');
+  write(root, "src/main.rs", "fn main() {}\n");
+  write(root, ".github/workflows/ci.yml", "jobs:\n  ci:\n    steps:\n      - run: |\n          cargo clippy \\\n            --all-targets -- -D warnings\n      - run: cargo test --workspace\n");
+  const p = detectProject(root, config);
+  assert.deepEqual(p.ci?.runs, ["cargo test --workspace", "cargo clippy --all-targets -- -D warnings"]);
+  const clippy = p.checks.find((c) => c.source === "CI workflow" && c.label === "lint")!;
+  assert.equal(clippy.cmd, "cargo clippy --all-targets -- -D warnings");
   rmSync(root, { recursive: true, force: true });
 });
 
