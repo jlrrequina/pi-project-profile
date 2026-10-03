@@ -223,7 +223,14 @@ export default function projectProfile(pi: ExtensionAPI) {
       const key = r.check.id + "@" + r.check.cwd;
       if (s!.notifiedBroken.has(key)) continue;
       s!.notifiedBroken.add(key);
-      notify(ctx, `verify: ${r.check.label} (\`${r.check.cmd.replace(" <files>", "")}\`) disabled this session — ${r.reason}${r.logPath ? ` · log: ${tildify(r.logPath)}` : ""}`, "warning");
+      const cmd = r.check.cmd.replace(" <files>", "");
+      const log = r.logPath ? ` · log: ${tildify(r.logPath)}` : "";
+      notify(ctx, `verify: ${r.check.label} (\`${cmd}\`) disabled this session — ${r.reason}${log}`, "warning");
+      // the toast never reaches the model, which was promised this check in the prompt section
+      pi.sendMessage(
+        { customType: VERIFY_MSG, content: `[verification] ${r.check.label} (\`${cmd}\`) could not run and is disabled for this session — ${r.reason}${log}. Nothing verified ${r.check.label} for you: do not assume it passes.`, display: true, details: { seq: -1, kind: "env", headline: `${r.check.label} unavailable: ${r.reason}` } },
+        { triggerTurn: false },
+      );
     }
   }
 
@@ -494,7 +501,7 @@ export default function projectProfile(pi: ExtensionAPI) {
   pi.registerMessageRenderer(VERIFY_MSG, (message, { expanded, outputPad }, theme) => {
     const details = message.details as { kind?: string; headline?: string } | undefined;
     const kind = details?.kind ?? "info";
-    const color = kind === "failure" ? "error" : kind === "giveup" || kind === "perturn" || kind === "finding" ? "warning" : "success";
+    const color = kind === "failure" ? "error" : kind === "giveup" || kind === "perturn" || kind === "finding" || kind === "env" ? "warning" : "success";
     const head = `${theme.fg(color, "[verify]")} ${details?.headline ?? ""}`;
     const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
     box.addChild(new Text(head, 0, 0));

@@ -3,6 +3,8 @@
 ## Unreleased
 
 - `/profile` now shows `disabled this session: <reason>` next to a check the gate disabled. The report looked the check up by id while the gate stores `id@cwd` (the doctor already used the right key), so the annotation never appeared.
+- A check the gate cannot run (tool missing, dependencies not installed, timeout) is now reported to the model once per session as a `[verification]` message, not only as a UI toast the model never sees. Before, the model kept the prompt's promise that the check runs automatically and could report success without any check having run.
+- The prompt section's `Verification:` line no longer promises checks that cannot run yet. When every automatic check is unavailable (typically before the first install), it names the commands and the reason instead of "runs … automatically".
 - Detection: a `run:` step that continues a command with a trailing backslash (`cargo clippy \` + `--all-targets -- -D warnings`) is one command now. Before, the first line alone became the CI run and a lint check that could not execute. `DETECTOR_VERSION` 14.
 
 ## 1.2.0 — 2026-09-30

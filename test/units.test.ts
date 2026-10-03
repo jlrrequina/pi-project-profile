@@ -276,6 +276,7 @@ test("prompt section is static and bounded", () => {
   const root = tmp();
   write(root, "package.json", JSON.stringify({ name: "x", scripts: { test: "vitest run", typecheck: "tsc --noEmit" }, devDependencies: { typescript: "5", vitest: "2", react: "19" } }));
   write(root, ".cursorrules", "Use tabs.");
+  mkdirSync(join(root, "node_modules"), { recursive: true });
   const stored: StoredProfile = { detected: detectProject(root, config), user: emptyUserData(), updatedAt: "t" };
   const a = renderPromptSection(stored, config, { verifyEnabled: true, piLoadedContextFiles: [] });
   const b = renderPromptSection(stored, config, { verifyEnabled: true, piLoadedContextFiles: [] });
@@ -287,6 +288,20 @@ test("prompt section is static and bounded", () => {
   // π reports loaded context files as OS paths (backslashes on Windows): still recognised, not inlined twice
   const win = renderPromptSection(stored, config, { verifyEnabled: true, piLoadedContextFiles: ["C:\\work\\x\\.cursorrules"] });
   assert.ok(win.includes(".cursorrules (loaded)") && !win.includes("### .cursorrules"));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("prompt section does not promise checks that cannot run before install", () => {
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "x", scripts: { lint: "eslint ." }, devDependencies: { typescript: "5", eslint: "9" } }));
+  write(root, "tsconfig.json", "{}");
+  const stored: StoredProfile = { detected: detectProject(root, config), user: emptyUserData(), updatedAt: "t" };
+  const before = renderPromptSection(stored, config, { verifyEnabled: true, piLoadedContextFiles: [] });
+  const line = (s: string) => s.split("\n").find((l) => l.startsWith("- Verification:"))!;
+  assert.equal(line(before), "- Verification: after each turn that changed files, the harness cannot run `npx tsc --noEmit -p tsconfig.json`, `npm run lint` (tsc not installed in node_modules — run `npm install`; dependencies not installed — run `npm install`). Verify your own changes with the commands above where they apply. `run_checks` runs the checks on demand.");
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const after = renderPromptSection(stored, config, { verifyEnabled: true, piLoadedContextFiles: [] });
+  assert.ok(line(after).includes("runs `npx tsc --noEmit -p tsconfig.json`, `npm run lint` automatically"), line(after));
   rmSync(root, { recursive: true, force: true });
 });
 

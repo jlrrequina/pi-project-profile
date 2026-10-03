@@ -110,7 +110,12 @@ export function renderPromptSection(stored: StoredProfile, config: ProfileConfig
   const auto = checks.filter((c) => c.tier === "fast" || c.tier === "lint");
   const tests = checks.filter((c) => c.tier === "test");
   const builds = checks.filter((c) => c.tier === "build");
-  if (opts.verifyEnabled && (auto.length || tests.length || builds.length)) {
+  const blocked = auto.filter((c) => availability(c));
+  if (opts.verifyEnabled && auto.length && blocked.length === auto.length) {
+    // nothing automatic can run yet (typically before the first install): say so instead of promising checks
+    const reasons = [...new Set(blocked.map((c) => availability(c)!))].join("; ");
+    lines.push(`- Verification: after each turn that changed files, the harness cannot run ${uniqCmds(auto).map((c) => `\`${c}\``).join(", ")} (${reasons}). Verify your own changes with the commands above where they apply. \`run_checks\` runs the checks on demand.`);
+  } else if (opts.verifyEnabled && (auto.length || tests.length || builds.length)) {
     const bits: string[] = [];
     if (auto.length) bits.push(`runs ${uniqCmds(auto).map((c) => `\`${c}\``).join(", ")} automatically`);
     const t = tierAllowed("test", stored, config);

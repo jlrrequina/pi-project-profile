@@ -27,6 +27,7 @@ async function load() {
   const tools: string[] = [];
   const impl: Record<string, { execute: (...a: any[]) => Promise<{ content: Array<{ text: string }> }> }> = {};
   const commands: string[] = [];
+  const sent: Array<{ content: string; details?: any }> = [];
   mod.default({
     on: (event: string, h: Handler) => {
       (handlers[event] ??= []).push(h);
@@ -40,7 +41,7 @@ async function load() {
     registerMessageRenderer: () => {},
     registerEntryRenderer: () => {},
     appendEntry: () => {},
-    sendMessage: () => {},
+    sendMessage: (m: { content: string; details?: any }) => sent.push(m),
   } as any);
   const notes: Array<[string, string]> = [];
   const statuses: string[] = [];
@@ -67,7 +68,7 @@ async function load() {
     rmSync(agent, { recursive: true, force: true });
   };
   const runChecks = async (ctx: any, params: Record<string, unknown> = {}) => (await impl["run_checks"]!.execute("id", params, undefined, undefined, ctx)).content.map((c) => c.text).join("\n");
-  return { handlers, tools, commands, notes, statuses, ctxFor, emit, cleanup, runChecks };
+  return { handlers, tools, commands, notes, statuses, sent, ctxFor, emit, cleanup, runChecks };
 }
 
 /** Wait until `pred` holds (background baseline runs finish on their own schedule). */
@@ -184,6 +185,37 @@ test("gate: a failing check sends the agent back; on the next prompt the same fa
   assert.notEqual(second?.continue, true);
   assert.ok(text(second).includes("no new failures") && text(second).includes("typecheck (1 known)"));
   assert.ok(x.notes.some(([, m]) => m.includes("existed before this task")));
+  x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("a check that cannot run is reported to the model once, not only as a UI toast", async () => {
+  const x = await load();
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "demo", devDependencies: { typescript: "5" } }));
+  write(root, "package-lock.json", "{}");
+  write(root, "tsconfig.json", "{}");
+  mkdirSync(join(root, "node_modules"), { recursive: true }); // installed, but no tsc binary
+  const ctx = x.ctxFor(root);
+  await x.emit("session_start", {}, ctx);
+  const edit = async (content: string) => {
+    const event = { toolName: "write", input: { path: "src/a.ts", content }, content: [{ type: "text", text: "ok" }], isError: false };
+    await x.emit("tool_call", { toolName: "write", input: event.input }, ctx);
+    write(root, "src/a.ts", content);
+    await x.emit("tool_result", event, ctx);
+  };
+  await x.emit("before_agent_start", prompt(), ctx);
+  await edit("export const a = 1;\n");
+  const first = await x.emit("agent_before_settle", settle(), ctx);
+  assert.notEqual(first?.continue, true, "nothing to repair: the check did not run");
+  await until(() => x.sent.length > 0);
+  assert.equal(x.sent.length, 1);
+  assert.ok(x.sent[0]!.content.startsWith("[verification] typecheck (`npx tsc --noEmit -p tsconfig.json`) could not run and is disabled for this session"), x.sent[0]!.content);
+  assert.equal(x.sent[0]!.details?.kind, "env");
+  await x.emit("before_agent_start", prompt(), ctx);
+  await edit("export const a = 2;\n");
+  await x.emit("agent_before_settle", settle(), ctx);
+  assert.equal(x.sent.length, 1, "the same broken check is reported once per session");
   x.cleanup();
   rmSync(root, { recursive: true, force: true });
 });
