@@ -25,7 +25,7 @@ async function load() {
   const mod = await import("../index.ts");
   const handlers: Record<string, Handler[]> = {};
   const tools: string[] = [];
-  const impl: Record<string, { execute: (...a: any[]) => Promise<{ content: Array<{ text: string }> }> }> = {};
+  const impl: Record<string, { annotations?: Record<string, boolean>; outputSchema?: unknown; execute: (...a: any[]) => Promise<{ content: Array<{ text: string }>; structuredContent?: unknown; isError?: boolean }> }> = {};
   const commands: string[] = [];
   const sent: Array<{ content: string; details?: any }> = [];
   mod.default({
@@ -67,8 +67,9 @@ async function load() {
     delete process.env.PI_CODING_AGENT_DIR;
     rmSync(agent, { recursive: true, force: true });
   };
-  const runChecks = async (ctx: any, params: Record<string, unknown> = {}) => (await impl["run_checks"]!.execute("id", params, undefined, undefined, ctx)).content.map((c) => c.text).join("\n");
-  return { handlers, tools, commands, notes, statuses, sent, ctxFor, emit, cleanup, runChecks };
+  const runChecksResult = async (ctx: any, params: Record<string, unknown> = {}) => impl["run_checks"]!.execute("id", params, undefined, undefined, ctx);
+  const runChecks = async (ctx: any, params: Record<string, unknown> = {}) => (await runChecksResult(ctx, params)).content.map((c) => c.text).join("\n");
+  return { handlers, tools, commands, notes, statuses, sent, impl, ctxFor, emit, cleanup, runChecks, runChecksResult };
 }
 
 /** Wait until `pred` holds (background baseline runs finish on their own schedule). */
@@ -318,6 +319,33 @@ test("run_checks at an umbrella root: one nested project runs; several are named
   assert.ok(two.includes("nested projects: api, site") && two.includes("pass files"), two);
   x.cleanup();
   y.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("run_checks declares annotations and returns structured content for programmatic callers", async () => {
+  const x = await load();
+  const tool = x.impl["run_checks"]!;
+  assert.deepEqual(tool.annotations, { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false });
+  assert.ok(tool.outputSchema, "outputSchema is declared so codemode scripts receive data, not text");
+  const root = tmp();
+  const failing = `node -e "console.error('src/a.ts(1,1): error TS2322: Type string is not assignable to type number.'); process.exit(2)"`;
+  write(root, "package.json", JSON.stringify({ name: "demo", scripts: { typecheck: failing } }));
+  write(root, "package-lock.json", "{}");
+  write(root, "tsconfig.json", "{}");
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const ctx = x.ctxFor(root);
+  await x.emit("session_start", {}, ctx);
+  const r = await x.runChecksResult(ctx);
+  assert.equal(r.isError, undefined);
+  const data = r.structuredContent as { status: string; runs: Array<{ id: string; label: string; status: string; exitCode: number | null; summary: string[] }> };
+  assert.equal(data.status, "red");
+  const run = data.runs.find((q) => q.id === "node:typecheck")!;
+  assert.equal(run.label, "typecheck");
+  assert.equal(run.status, "fail");
+  assert.equal(run.exitCode, 2);
+  assert.deepEqual(run.summary, ["src/a.ts(1,1): error TS2322: Type string is not assignable to type number."]);
+  assert.ok(r.content[0]!.text.startsWith("verification: red"), r.content[0]!.text);
+  x.cleanup();
   rmSync(root, { recursive: true, force: true });
 });
 

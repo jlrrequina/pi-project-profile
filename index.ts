@@ -957,9 +957,25 @@ export default function projectProfile(pi: ExtensionAPI) {
     },
   });
 
+  const RUN_CHECKS_OUTPUT = Type.Object({
+    status: Type.Union([Type.Literal("green"), Type.Literal("red"), Type.Literal("env"), Type.Literal("skipped")]),
+    runs: Type.Array(
+      Type.Object({
+        id: Type.String(),
+        label: Type.String(),
+        status: Type.Union([Type.Literal("pass"), Type.Literal("fail"), Type.Literal("env"), Type.Literal("skipped"), Type.Literal("preexisting")]),
+        exitCode: Type.Union([Type.Number(), Type.Null()]),
+        durationMs: Type.Number(),
+        summary: Type.Array(Type.String(), { description: "Pruned diagnostic lines of a failing run." }),
+      }),
+    ),
+  });
   pi.registerTool({
     name: "run_checks",
     label: "Run project checks",
+    // runs the project's own commands, which may write caches or build output, so not read-only; repeating it changes nothing further
+    annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+    outputSchema: RUN_CHECKS_OUTPUT,
     description: "Run this project's own verification checks (typecheck/lint automatically; tests/build only if the user has allowed them for this repo). Returns pruned diagnostics. Use it after substantial changes instead of guessing commands.",
     promptSnippet: "Run the project's typecheck/lint/tests and get pruned diagnostics",
     promptGuidelines: ["Prefer run_checks over ad-hoc test/lint commands when you want to verify your changes; it knows the project's tooling."],
@@ -970,9 +986,10 @@ export default function projectProfile(pi: ExtensionAPI) {
     async execute(_id, params, _signal, _onUpdate, ctx) {
       const tiers: Tier[] | undefined = params.tier === "all" ? undefined : params.tier ? ["syntax", params.tier] : ["syntax", "fast", "lint"];
       const verdict = await manualVerify(ctx, { tiers, files: params.files, interactive: true, baseline: true });
-      if (!verdict) return { content: [{ type: "text", text: "verification unavailable (no profile or a run is already in progress)" }], details: undefined };
+      if (!verdict) return { content: [{ type: "text", text: "verification unavailable (no profile or a run is already in progress)" }], details: undefined, isError: true };
       const text = `verification: ${verdict.status} (${(verdict.durationMs / 1000).toFixed(1)}s)\n${verdictReport(verdict).replace(/\*\*/g, "")}`;
-      return { content: [{ type: "text", text }], details: { status: verdict.status, runs: verdict.runs.map((r) => ({ id: r.check.id, status: r.status, exitCode: r.exitCode, durationMs: r.durationMs })) } };
+      const data = { status: verdict.status, runs: verdict.runs.map((r) => ({ id: r.check.id, label: r.check.label, status: r.status, exitCode: r.exitCode, durationMs: r.durationMs, summary: r.summary })) };
+      return { content: [{ type: "text", text }], structuredContent: data, details: data };
     },
   });
 
