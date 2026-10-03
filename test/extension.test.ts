@@ -3,10 +3,11 @@
  * through π's event sequence with a mock ExtensionAPI and context.
  */
 import assert from "node:assert/strict";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { profilePath } from "../profile/store.ts";
 
 type Handler = (event: any, ctx: any) => any;
 
@@ -27,7 +28,9 @@ async function load() {
   const tools: string[] = [];
   const impl: Record<string, { annotations?: Record<string, boolean>; outputSchema?: unknown; execute: (...a: any[]) => Promise<{ content: Array<{ text: string }>; structuredContent?: unknown; isError?: boolean }> }> = {};
   const commands: string[] = [];
+  const commandImpl: Record<string, { handler: (args: string, ctx: any) => Promise<void> }> = {};
   const sent: Array<{ content: string; details?: any }> = [];
+  const reports: string[] = [];
   mod.default({
     on: (event: string, h: Handler) => {
       (handlers[event] ??= []).push(h);
@@ -37,10 +40,13 @@ async function load() {
       tools.push(t.name);
       impl[t.name] = t;
     },
-    registerCommand: (name: string) => commands.push(name),
+    registerCommand: (name: string, options: { handler: (args: string, ctx: any) => Promise<void> }) => {
+      commands.push(name);
+      commandImpl[name] = options;
+    },
     registerMessageRenderer: () => {},
     registerEntryRenderer: () => {},
-    appendEntry: () => {},
+    appendEntry: (_type: string, data: { markdown: string }) => reports.push(data.markdown),
     sendMessage: (m: { content: string; details?: any }) => sent.push(m),
   } as any);
   const notes: Array<[string, string]> = [];
@@ -69,7 +75,11 @@ async function load() {
   };
   const runChecksResult = async (ctx: any, params: Record<string, unknown> = {}) => impl["run_checks"]!.execute("id", params, undefined, undefined, ctx);
   const runChecks = async (ctx: any, params: Record<string, unknown> = {}) => (await runChecksResult(ctx, params)).content.map((c) => c.text).join("\n");
-  return { handlers, tools, commands, notes, statuses, sent, impl, ctxFor, emit, cleanup, runChecks, runChecksResult };
+  const command = (line: string, ctx: any) => {
+    const [name, ...rest] = line.replace(/^\//, "").split(" ");
+    return commandImpl[name!]!.handler(rest.join(" "), ctx);
+  };
+  return { handlers, tools, commands, notes, statuses, sent, reports, impl, agent, ctxFor, emit, cleanup, runChecks, runChecksResult, command };
 }
 
 /** Wait until `pred` holds (background baseline runs finish on their own schedule). */
@@ -153,6 +163,10 @@ test("scoped instructions reach the tool result once per session", async () => {
   const second = read();
   await x.emit("tool_result", second, ctx);
   assert.equal(second.content.length, 1, "delivered only once per session");
+  await x.emit("session_compact", {}, ctx);
+  const third = read();
+  await x.emit("tool_result", third, ctx);
+  assert.ok(third.content.map((c: any) => c.text).join("\n").includes("Document every exported function."), "delivered again after compaction dropped it");
   x.cleanup();
   rmSync(root, { recursive: true, force: true });
 });
@@ -346,6 +360,154 @@ test("run_checks declares annotations and returns structured content for program
   assert.deepEqual(run.summary, ["src/a.ts(1,1): error TS2322: Type string is not assignable to type number."]);
   assert.ok(r.content[0]!.text.startsWith("verification: red"), r.content[0]!.text);
   x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+/** A project whose typecheck script prints one tsc-style diagnostic and fails. */
+function failingProject(root: string, extra: Record<string, string> = {}, message = "Type string is not assignable to type number", onlyWhenEdited = false) {
+  const guard = onlyWhenEdited ? "if (!require('fs').existsSync('src/a.ts')) process.exit(0); " : "";
+  const typecheck = `node -e "${guard}console.error('src/a.ts(1,1): error TS2322: ${message}.'); process.exit(2)"`;
+  write(root, "package.json", JSON.stringify({ name: "demo", scripts: { typecheck, ...extra } }));
+  write(root, "package-lock.json", "{}");
+  write(root, "tsconfig.json", "{}");
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+}
+
+/** One write-tool round trip as π reports it. */
+async function editFile(x: Awaited<ReturnType<typeof load>>, ctx: any, root: string, rel: string, content: string) {
+  const event = { toolName: "write", input: { path: rel, content }, content: [{ type: "text", text: "ok" }], isError: false };
+  await x.emit("tool_call", { toolName: "write", input: event.input }, ctx);
+  write(root, rel, content);
+  await x.emit("tool_result", event, ctx);
+}
+
+const kinds = (r: any) => (r?.entries ?? []).map((e: any) => e.details?.kind ?? e.type);
+
+test("/profile subcommands persist user data the next prompt and report reflect", async () => {
+  const x = await load();
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "demo", scripts: { test: "vitest run" }, devDependencies: { vitest: "2" } }));
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const ctx = x.ctxFor(root);
+  await x.emit("session_start", {}, ctx);
+  const user = () => JSON.parse(readFileSync(profilePath(x.agent, realpathSync(root)), "utf8")).user;
+  const lastNote = () => x.notes.at(-1)![1];
+
+  await x.command("/profile set lint make lint", ctx);
+  assert.equal(user().overrides.lint, "make lint");
+  assert.ok(lastNote().startsWith("project-profile: lint = `make lint`"), lastNote());
+  await x.command("/profile set lint -", ctx);
+  assert.equal(user().overrides.lint, null);
+  await x.command("/profile set", ctx);
+  assert.ok(lastNote().startsWith("usage: /profile set"), lastNote());
+
+  await x.command("/profile tests allow", ctx);
+  assert.equal(user().permissions.tests, "allow");
+  await x.command("/profile tests ask", ctx);
+  assert.equal(user().permissions.tests, undefined);
+
+  await x.command("/profile verify off", ctx);
+  assert.equal(user().verify, false);
+  const p = prompt();
+  await x.emit("before_agent_start", p, ctx);
+  assert.ok(!p.systemPromptOptions.sections["project_profile"]!.includes("- Verification:"), "verify off: the prompt promises no checks");
+  await x.command("/profile verify default", ctx);
+  assert.equal(user().verify, undefined);
+
+  await x.command("/profile note Use tabs", ctx);
+  assert.deepEqual(user().notes, ["Use tabs"]);
+  await x.command("/profile notes", ctx);
+  assert.equal(lastNote(), "1. Use tabs");
+  await x.command("/profile show", ctx);
+  assert.ok(x.reports.at(-1)!.startsWith("# Project profile: ") && x.reports.at(-1)!.includes('- notes: "Use tabs"'), x.reports.at(-1));
+  await x.command("/profile notes clear", ctx);
+  assert.deepEqual(user().notes, []);
+
+  await x.command("/profile set test make test", ctx);
+  await x.command("/profile forget", ctx);
+  assert.deepEqual(user().overrides, {}, "forget drops user data and re-detects");
+  await x.command("/profile bogus", ctx);
+  assert.ok(lastNote().startsWith("usage: /profile [show|"), lastNote());
+  x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("/verify runs one tier on demand, hands a red result to the model without a turn, and can be cancelled", async () => {
+  const x = await load();
+  const root = tmp();
+  failingProject(root, { lint: `node -e "console.error('src/a.ts:1:1: error no-unused-vars x is defined but never used'); process.exit(1)"` });
+  const ctx = x.ctxFor(root);
+  await x.emit("session_start", {}, ctx);
+  await x.command("/verify lint", ctx);
+  const report = x.reports.at(-1)!;
+  assert.ok(report.startsWith("## /verify \u2014 red"), report);
+  assert.ok(report.includes("\u2717 **lint**") && !report.includes("typecheck"), report);
+  const msg = x.sent.at(-1)!;
+  assert.ok(msg.content.startsWith("[verification] manual /verify found failures:"), msg.content);
+  assert.deepEqual({ seq: msg.details.seq, kind: msg.details.kind }, { seq: -1, kind: "failure" });
+  await x.command("/verify cancel", ctx);
+  assert.equal(x.notes.at(-1)![1], "verify: cancelled");
+  x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("per-turn checks: fast tiers only, a note without `continue`, and the earlier note is superseded", async () => {
+  const x = await load();
+  write(x.agent, "project-profile/config.json", JSON.stringify({ verify: { perTurn: true } }));
+  const root = tmp();
+  failingProject(root, { test: `node -e "require('fs').writeFileSync('TESTS_RAN', '')"` }, undefined, true);
+  const branch: any[] = [];
+  const ctx = { ...x.ctxFor(root), sessionManager: { getBranch: () => branch } };
+  await x.emit("session_start", {}, ctx);
+  await x.emit("before_agent_start", prompt(), ctx);
+  // the untouched-tree baseline runs in the background; per-turn checks wait for it, so the test does too
+  await until(() => x.statuses.some((t) => t.startsWith("\u23f3 baseline")) && !x.statuses.at(-1)!.startsWith("\u23f3"));
+  await editFile(x, ctx, root, "src/a.ts", "export const a = 1;\n");
+  const first = await x.emit("turn_end", { outcome: "completed", entries: [], turnIndex: 0 }, ctx);
+  assert.equal(first?.continue, undefined, "the agent is still working: never asked to continue");
+  assert.deepEqual(kinds(first), ["perturn"]);
+  assert.ok(text(first).includes("TS2322"), text(first));
+  assert.ok(!existsSync(join(root, "TESTS_RAN")), "the test tier never runs mid-task");
+  branch.push({ type: "custom_message", customType: "project-profile/verify", id: "note-1", details: first.entries[0].details });
+  await editFile(x, ctx, root, "src/a.ts", "export const a = 2;\n");
+  const second = await x.emit("turn_end", { outcome: "completed", entries: [], turnIndex: 1 }, ctx);
+  assert.deepEqual(kinds(second), ["context_edit", "perturn"]);
+  assert.equal(second.entries[0].targetId, "note-1");
+  x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("repair loop stops when the same failure repeats, and when the rounds are exhausted", async () => {
+  const x = await load();
+  const root = tmp();
+  failingProject(root);
+  const ctx = x.ctxFor(root);
+  await x.emit("session_start", {}, ctx);
+  await x.emit("before_agent_start", prompt(), ctx);
+  await editFile(x, ctx, root, "src/a.ts", "export const a = 1;\n");
+  const first = await x.emit("agent_before_settle", settle(), ctx);
+  assert.equal(first?.continue, true);
+  assert.deepEqual(kinds(first), ["failure"]);
+  await editFile(x, ctx, root, "src/a.ts", "export const a = 2;\n");
+  const second = await x.emit("agent_before_settle", settle(), ctx);
+  assert.deepEqual(kinds(second), ["giveup"]);
+  assert.ok(text(second).includes("automatic repair stopped: the same failure repeated with no progress"), text(second));
+  x.cleanup();
+
+  const y = await load();
+  write(y.agent, "project-profile/config.json", JSON.stringify({ verify: { maxRepairRounds: 1 } }));
+  const ctx2 = y.ctxFor(root);
+  await y.emit("session_start", {}, ctx2);
+  await y.emit("before_agent_start", prompt(), ctx2);
+  await editFile(y, ctx2, root, "src/a.ts", "export const a = 3;\n");
+  assert.equal((await y.emit("agent_before_settle", settle(), ctx2))?.continue, true);
+  // a different failure the second time: not "repeated", but round 2 of max 1
+  failingProject(root, {}, "Property x does not exist");
+  await editFile(y, ctx2, root, "src/a.ts", "export const a = 4;\n");
+  const last = await y.emit("agent_before_settle", settle(), ctx2);
+  assert.deepEqual(kinds(last), ["giveup"]);
+  assert.ok(text(last).includes("automatic repair stopped: 1 repair rounds exhausted"), text(last));
+  y.cleanup();
   rmSync(root, { recursive: true, force: true });
 });
 

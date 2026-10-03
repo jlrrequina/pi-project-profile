@@ -8,6 +8,7 @@
 - `run_checks` declares `outputSchema` and returns `structuredContent` (`{ status, runs: [{ id, label, status, exitCode, durationMs, summary }] }`), so codemode scripts calling `tools.run_checks()` get data instead of text (π 1.0.0 extension API). It also declares tool `annotations` (`idempotentHint: true`, not read-only, not destructive) for permission extensions, and reports "verification unavailable" as a tool error.
 - A weekly `Host compatibility` workflow typechecks and tests against the latest π release, so an upstream API change shows up without waiting for a Dependabot bump.
 - The development dependencies follow π 1.0.0 (`@earendil-works/pi-ai`, `pi-coding-agent`, `pi-tui`); the peer range stays `>=0.87.0`.
+- Tests: the mock π API now captures command handlers, so `/profile` (`set`, `tests`, `verify`, `note`, `notes`, `show`, `forget`, unknown subcommands) and `/verify` (`lint`, `cancel`, red result sent to the model) run under test; per-turn checks, the repair loop's two stop conditions, superseded notes, re-delivery of scoped instructions after compaction, and user overrides in `effectiveChecks` are pinned as well.
 - Detection: a `run:` step that continues a command with a trailing backslash (`cargo clippy \` + `--all-targets -- -D warnings`) is one command now. Before, the first line alone became the CI run and a lint check that could not execute. `DETECTOR_VERSION` 14.
 
 ## 1.2.0 — 2026-09-30

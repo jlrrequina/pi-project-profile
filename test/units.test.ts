@@ -305,6 +305,22 @@ test("prompt section does not promise checks that cannot run before install", ()
   rmSync(root, { recursive: true, force: true });
 });
 
+test("user overrides replace, disable or add checks by label", () => {
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "x", scripts: { test: "vitest run", lint: "eslint ." }, devDependencies: { vitest: "2", eslint: "9", prettier: "3" } }));
+  write(root, ".prettierrc", "{}");
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const stored: StoredProfile = { detected: detectProject(root, config), user: emptyUserData(), updatedAt: "t" };
+  const labels = (s: StoredProfile) => effectiveChecks(s).map((c) => `${c.label}:${c.cmd}`).filter((l) => !l.startsWith("syntax:"));
+  assert.deepEqual(labels(stored), ["lint:npm run lint", "format:npx prettier --check --ignore-unknown <files>", "test:npm test"]);
+  const user = { ...stored.user, overrides: { test: null, lint: "make lint", format: "biome format .", typecheck: "make types" } as Record<string, string | null> };
+  const effective = effectiveChecks({ ...stored, user });
+  assert.deepEqual(labels({ ...stored, user }), ["lint:make lint", "format:biome format .", "typecheck:make types"]);
+  const format = effective.find((c) => c.label === "format")!;
+  assert.deepEqual({ id: format.id, tier: format.tier, cwd: format.cwd, argv: format.argv, source: format.source }, { id: "user:format", tier: "lint", cwd: stored.detected.root, argv: ["sh", "-c", "biome format ."], source: "user override" });
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("/profile report names a check the gate disabled this session", () => {
   const root = tmp();
   write(root, "package.json", JSON.stringify({ name: "x", scripts: { test: "vitest run" }, devDependencies: { vitest: "2" } }));
