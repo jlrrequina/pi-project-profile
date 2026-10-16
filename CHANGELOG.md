@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.3.1 — 2026-10-16
+
 - The development dependencies follow π 1.0.4 (`@earendil-works/pi-ai`, `pi-coding-agent`, `pi-tui`); the peer range stays `>=0.87.0`. Typecheck and tests also pass against π 1.3.0, the latest release. The extension's code is unchanged.
 - CI uses `actions/setup-node` 7.1.0 and `actions/upload-artifact` 7.0.2.
 
