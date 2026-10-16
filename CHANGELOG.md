@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- The development dependencies follow π 1.0.4 (`@earendil-works/pi-ai`, `pi-coding-agent`, `pi-tui`); the peer range stays `>=0.87.0`. Typecheck and tests also pass against π 1.3.0, the latest release. The extension's code is unchanged.
+- CI uses `actions/setup-node` 7.1.0 and `actions/upload-artifact` 7.0.2.
+
 ## 1.3.0 — 2026-10-03
 
 - `/profile` now shows `disabled this session: <reason>` next to a check the gate disabled. The report looked the check up by id while the gate stores `id@cwd` (the doctor already used the right key), so the annotation never appeared.
