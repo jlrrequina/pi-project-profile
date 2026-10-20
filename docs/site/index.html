@@ -89,7 +89,7 @@
         {
           "@type": "Question",
           "name": "What happens when a check fails?",
-          "acceptedAnswer": { "@type": "Answer", "text": "The failing diagnostics go back to the agent, which must fix the cause — not disable the check — and end its turn; the checks re-run. After three rounds, or when a round changes nothing or repeats the same failure, the loop stops and the agent summarizes what is still failing instead of claiming success." }
+          "acceptedAnswer": { "@type": "Answer", "text": "The failing diagnostics go back to the agent, which must fix the cause — not disable the check — and end its turn; the checks re-run. After three rounds, or when a round changes nothing or repeats the same failure, the loop stops and the agent summarizes what is still failing instead of claiming success. Each follow-up asks the agent to end with a complete summary of the task, updated with the verification result, so its last message is the task's result and not a reply about a check." }
         },
         {
           "@type": "Question",
@@ -218,7 +218,7 @@
     <h3>Will it run my tests or builds automatically?</h3>
     <p>Only after you allow it once per repository. Typecheck and lint run automatically because they are read-only. Installs, migrations, deploys and anything that needs the network are never run.</p>
     <h3>What happens when a check fails?</h3>
-    <p>The failing diagnostics go back to the agent, which must fix the cause — not disable the check — and end its turn; the checks re-run. After three rounds, or when a round changes nothing or repeats the same failure, the loop stops and the agent summarizes what is still failing instead of claiming success.</p>
+    <p>The failing diagnostics go back to the agent, which must fix the cause — not disable the check — and end its turn; the checks re-run. After three rounds, or when a round changes nothing or repeats the same failure, the loop stops and the agent summarizes what is still failing instead of claiming success. Each follow-up asks the agent to end with a complete summary of the task, updated with the verification result, so its last message is the task's result and not a reply about a check.</p>
     <h3>Does it break prompt caching?</h3>
     <p>No. The <code>&lt;project_profile&gt;</code> section contains no timestamps, branch names or iteration-order-dependent content, so it is byte-identical for every turn of a session.</p>
     <h3>The detected command is wrong. How do I fix it?</h3>

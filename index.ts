@@ -49,6 +49,8 @@ function debug(event: string, data: Record<string, unknown> = {}): void {
   }
 }
 const REPORT_ENTRY = "project-profile/report";
+/** Ends every follow-up that continues the agent: its next final message is the last message, which is what the user reads (end of the TUI transcript, `pi -p` output, /copy), and its summary is now above it. */
+const SUMMARY_REQUEST = "The user reads your last message as the result of this task, and your earlier summary is no longer the last message. End your turn with a complete summary of the whole task: what you changed, how it was verified, and what is left, updated with what happened since (fixes, this verification result). Do not reply only to this message.";
 const STATUS_KEY = "verify";
 /** Project dirs whose checks get a baseline run per session (bounds the background work in monorepos). */
 const MAX_BASELINES = 4;
@@ -386,14 +388,17 @@ export default function projectProfile(pi: ExtensionAPI) {
     return { draft: { type: "custom_message", customType: VERIFY_MSG, content: lines.join("\n"), display: true, details: { seq: st.prompt.seq, kind: "finding", headline: `review: ${summary}` } }, cont };
   }
 
-  /** Assemble a boundary result: earlier handlers' entries + ours (+ findings), continuing when any part asks to. */
+  /** Assemble a boundary result: earlier handlers' entries + ours (+ findings), continuing when any part asks to. A continuation ends with SUMMARY_REQUEST, once, after everything it asks for. */
   function boundary(prior: SessionBoundaryDraft[], drafts: SessionBoundaryDraft[], cont: boolean, f?: { draft: SessionBoundaryDraft; cont: boolean }) {
     if (f) {
       drafts.push(f.draft);
       cont = cont || f.cont;
     }
     if (drafts.length === 0) return undefined;
-    return cont ? { entries: [...prior, ...drafts], continue: true } : { entries: [...prior, ...drafts] };
+    if (!cont) return { entries: [...prior, ...drafts] };
+    const last = drafts[drafts.length - 1];
+    if (last.type === "custom_message" && typeof last.content === "string") drafts[drafts.length - 1] = { ...last, content: `${last.content}\n\n${SUMMARY_REQUEST}` };
+    return { entries: [...prior, ...drafts], continue: true };
   }
 
   function whereOf(cwd: string): string {
@@ -444,7 +449,7 @@ export default function projectProfile(pi: ExtensionAPI) {
     const failing = verdict.runs.filter((r) => r.status === "fail").map((r) => `${r.check.label} (\`${r.check.cmd.replace(" <files>", "")}\`)`);
     const head = `[verification] automatic repair stopped: ${reason}. Still failing: ${failing.join(", ")}.`;
     if (!summarize) return `${head} The user has been notified. Do not claim the task is complete.`;
-    return `${head}\nDo not make further code changes now. Reply with a short summary for the user: what is failing, what you tried, your best hypothesis, and what you recommend next. Do not claim the task is complete.`;
+    return `${head}\nDo not make further code changes now, and do not claim the task is complete. In your final message, say what is still failing, what you tried, your best hypothesis, and what you recommend next.`;
   }
 
   /** Replace earlier failure / per-turn messages from this prompt with a one-liner to save context. */

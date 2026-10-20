@@ -60,6 +60,8 @@ The baseline behind *known* comes from a background run of the project-wide type
 
 If a failure is genuinely pre-existing and unrelated to the change, say so explicitly and stop instead of chasing it.
 
+A follow-up that sends you back ends with a request for a complete summary of the whole task. Your last message is what the user reads, and your earlier summary is no longer last. End your turn with that summary, updated with the fixes and the verification result, not only a reply about the check.
+
 ## Commands the user can run
 
 The model cannot invoke slash commands. When configuration must change, give the user the exact command:

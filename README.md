@@ -75,6 +75,7 @@ Installs, migrations, deploys and anything network-bound are never run.
 - **Fast.** Read-only checks in a tier run in parallel; tests and builds run one at a time.
 - **Actionable failures.** Diagnostic lines first (~40 lines, full log path), plus the exact auto-fix command for format/lint failures (`prettier --write <files>`, `ruff check --fix <files>`, …).
 - **Bounded.** At most `maxRepairRounds` (3); stops early when a round changes nothing or repeats the same failure, then asks the agent for a summary. Environment failures (missing tool, deps not installed, timeout, database down) go to *you* and disable that check for the session.
+- **The summary stays last.** Each follow-up that sends the agent back asks it to end with a complete summary of the task, updated with the fixes and the verification result. The last message (the end of the transcript, `pi -p` output, `/copy`) is the task's result, not a reply about a check.
 
 ## Review of the agent's changes
 
@@ -146,7 +147,7 @@ Only after you allow it once per repository (`/profile tests allow`, or answer t
 
 ### What happens when a check fails?
 
-The failing diagnostics (pruned to ~40 lines, with the full log path and an auto-fix hint) go back to the agent, which must fix the cause — not disable the check — and end its turn; the checks re-run. After three rounds, or when a round changes nothing or repeats the same failure, the loop stops and the agent summarizes what is still failing instead of claiming success.
+The failing diagnostics (pruned to ~40 lines, with the full log path and an auto-fix hint) go back to the agent, which must fix the cause — not disable the check — and end its turn; the checks re-run. After three rounds, or when a round changes nothing or repeats the same failure, the loop stops and the agent summarizes what is still failing instead of claiming success. Each follow-up asks the agent to end with a complete summary of the task, updated with the verification result, so its last message is the task's result and not a reply about a check.
 
 ### My repo was already failing before the agent touched it. Will the agent try to fix that?
 

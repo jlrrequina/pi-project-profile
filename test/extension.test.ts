@@ -512,6 +512,38 @@ test("repair loop stops when the same failure repeats, and when the rounds are e
   rmSync(root, { recursive: true, force: true });
 });
 
+test("a follow-up that continues the agent asks once, at its end, for the complete task summary; one that does not continue never asks", async () => {
+  const x = await load();
+  const root = tmp();
+  failingProject(root);
+  const ctx = x.ctxFor(root);
+  const asks = (r: any) => text(r).split("complete summary of the whole task").length - 1;
+  const endsWithAsk = (r: any) => /complete summary of the whole task[^\n]*$/.test(r.entries.at(-1).content);
+  await x.emit("session_start", {}, ctx);
+  await x.emit("before_agent_start", prompt(), ctx);
+  await editFile(x, ctx, root, "src/a.ts", "export const a = 1;\n");
+  const repair = await x.emit("agent_before_settle", settle(), ctx);
+  assert.equal(repair?.continue, true);
+  assert.equal(asks(repair), 1, text(repair));
+  assert.ok(endsWithAsk(repair), text(repair));
+  // the same failure again, with a suppression added while it fails: the give-up and the review finding both continue, one request at the very end
+  await editFile(x, ctx, root, "src/a.ts", "// @ts-ignore\nexport const a = 2;\n");
+  const giveUp = await x.emit("agent_before_settle", settle(), ctx);
+  assert.equal(giveUp?.continue, true);
+  assert.deepEqual(kinds(giveUp), ["giveup", "finding"]);
+  assert.equal(asks(giveUp), 1, text(giveUp));
+  assert.ok(endsWithAsk(giveUp), text(giveUp));
+  // next prompt: the failure is known, nothing continues
+  await x.emit("before_agent_start", prompt(), ctx);
+  await editFile(x, ctx, root, "src/a.ts", "export const a = 3;\n");
+  const known = await x.emit("agent_before_settle", settle(), ctx);
+  assert.notEqual(known?.continue, true);
+  assert.ok(text(known).includes("no new failures"), text(known));
+  assert.equal(asks(known), 0, text(known));
+  x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("per-turn checks are off by default", async () => {
   const x = await load();
   const root = tmp();
