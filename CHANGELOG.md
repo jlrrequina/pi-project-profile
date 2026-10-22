@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- CI squash-merges Dependabot's npm updates when every CI job passes. They change only development dependencies, not the published code, so they do not start a release. GitHub Actions updates still need a manual merge: the workflow token cannot merge changes to workflow files.
+
 ## 1.3.2 — 2026-10-20
 
 - A `[verification]` follow-up that sends the agent back (a repair round, the give-up message, a review finding that needs a fix) now ends with a request for a complete summary of the whole task, updated with the fixes and the verification result. Before, the agent ended with a reply to the check only, mostly that the failure existed before the task (18 of 30 repair rounds in the author's sessions since 1.2.0). That reply became the last message: the task summary moved up out of view, `pi -p` printed the reply, and `/copy` copied it. The give-up message no longer asks for a separate short summary; it asks for what still fails, what was tried, the best hypothesis and the next step in the final message.

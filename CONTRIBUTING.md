@@ -8,6 +8,7 @@ Issues and pull requests are welcome.
 - Bump `DETECTOR_VERSION` in `detect/index.ts` when detector output changes, and add a line to `CHANGELOG.md`.
 - Detector changes also run `npm run corpus` in CI: detection on ~20 real repositories with invariants (deterministic, bounded prompt section, automatic checks never write files) and expectations per repository. Run it locally before changing a detector's output.
 - Workflows pin every action to a commit SHA with the version in a comment (Dependabot keeps them current). CI lints them with actionlint and zizmor.
+- CI squash-merges Dependabot's npm updates when all its jobs pass. GitHub Actions updates need a manual merge, because the workflow token cannot merge changes to workflow files. Neither starts a release.
 - For a wrong detection, the scan output of the repository is the most useful thing to include.
 
 ## Releasing
