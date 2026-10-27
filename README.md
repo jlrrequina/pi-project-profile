@@ -74,7 +74,8 @@ Installs, migrations, deploys and anything network-bound are never run.
 - **Narrowed runs.** Tests run as `vitest related`, `jest --findRelatedTests`, `go test ./<pkg>/...`, `cargo test -p <package>` or `pytest <changed test files>` when that is safe; `cargo check` drops `--all-targets` when no test/bench/example code changed. Monorepo packages are checked in their own directory with their own scripts, and a workspace-wide root run replaces the per-package duplicates.
 - **Fast.** Read-only checks in a tier run in parallel; tests and builds run one at a time.
 - **Actionable failures.** Diagnostic lines first (~40 lines, full log path), plus the exact auto-fix command for format/lint failures (`prettier --write <files>`, `ruff check --fix <files>`, …).
-- **Bounded.** At most `maxRepairRounds` (3); stops early when a round changes nothing or repeats the same failure, then asks the agent for a summary. Environment failures (missing tool, deps not installed, timeout, database down) go to *you* and disable that check for the session.
+- **Bounded.** At most `maxRepairRounds` (3); stops early when a round changes nothing or repeats the same failure, then asks the agent for a summary. Environment failures (an executable not on `PATH`, deps not installed, timeout, database down) go to *you*, one message per cause with the directories it affects, and disable those checks for the session; `/profile refresh` turns them back on.
+- **Only real changes.** Committing or staging changes no file content, so it starts no check. Deleted files never reach per-file checks, and a related-tests run that involves one becomes the full run. Docs and lockfiles alone start nothing.
 - **The summary stays last.** Each follow-up that sends the agent back asks it to end with a complete summary of the task, updated with the fixes and the verification result. The last message (the end of the transcript, `pi -p` output, `/copy`) is the task's result, not a reply about a check.
 
 ## Review of the agent's changes
@@ -82,13 +83,13 @@ Installs, migrations, deploys and anything network-bound are never run.
 Compared with the content before the agent's first write (or git `HEAD`; files that were already dirty are never blamed on the agent):
 
 - `@ts-ignore`, `eslint-disable`, `# type: ignore`, `# noqa`, `#[allow]`, `//nolint`, `@Suppress`, … added
-- tests skipped (`.skip`, `xit`, `@pytest.mark.skip`, `t.Skip`, `#[ignore]`) or focused (`.only`), test files deleted, test cases removed
+- tests skipped (`.skip`, `xit`, `@pytest.mark.skip`, `t.Skip`, `#[ignore]`) or focused (`.only`), test files deleted (not when a whole worktree or clone is removed), test cases removed
 - stubs left in (`raise NotImplementedError`, `todo!()`, `throw new Error("not implemented")`)
 - checks loosened in config (`"strict": false`, ESLint rules `"off"`, `continue-on-error: true`, `|| true` in scripts)
 - secrets (AWS, GitHub, OpenAI/Anthropic, Slack, Stripe, Google, npm, Hugging Face keys, private keys; values are never repeated), `.env` files that are not gitignored
 - dependency changes without a lockfile update (`pnpm install`, `uv lock`, `go mod tidy`, …)
 
-Secrets, stale lockfiles and `.only` get one follow-up turn; weakening added while checks were failing gets one follow-up turn; everything else is shown to you.
+In JS and TS files, a suppression counts only as a directive that opens a comment and a focus or skip marker only in code, so test titles and fixture strings that mention them are not reported. Files in `ignoreDirs` (`node_modules`, build output) are not reviewed. Secrets, stale lockfiles and `.only` get one follow-up turn. Weakening that can hide a check that failed in this task also gets one follow-up turn: a `@ts-ignore` while the typecheck fails, a `.skip` while tests fail, but not an `eslint-disable` while tests fail. Everything else is shown to you.
 
 ## Commands and tool
 
@@ -121,7 +122,7 @@ Secrets, stale lockfiles and `.only` get one follow-up turn; weakening added whi
 ## Design rules
 
 - Nothing is hardcoded per project; every capability degrades detected → generic → no-op, never to a wrong action.
-- Only read-only checks run unprompted. The gate runs only in projects π reports as trusted.
+- Only read-only checks run unprompted. A workspace script (`turbo run lint`, `pnpm -r lint`) is one only when every package script it runs is read-only too: a package `lint` with `--fix` would rewrite files, so its packages are checked with their own read-only checks instead. The gate runs only in projects π reports as trusted.
 - Tools are bound late (`node_modules/.bin`, `uv run`/`poetry run`/`.venv`), so the profile stays valid before and after installs.
 - Repository instructions are framed as repository content, inlined only when small, and skipped when they read like a bot directive.
 

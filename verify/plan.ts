@@ -1,4 +1,5 @@
-import { basename, isAbsolute, relative, sep } from "node:path";
+import { existsSync } from "node:fs";
+import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { nearestProjectDir } from "../detect/index.ts";
 import { ext } from "../fs-utils.ts";
 import type { Check, StoredProfile, Tier } from "../types.ts";
@@ -95,7 +96,8 @@ export function buildPlan(
     for (const check of opts.checksFor(stored)) {
       const matching = check.exts && check.exts.length > 0 ? files.filter((f) => check.exts!.includes(ext(f))) : sourceFiles;
       if (!opts.unscoped && matching.length === 0) continue;
-      if (!opts.unscoped && check.tier !== "syntax" && sourceFiles.length === 0 && !(check.exts ?? []).some((e) => e === ".json" || e === ".yml" || e === ".yaml")) continue;
+      // Docs and lockfiles alone never warrant a run, even for a check that also reads them; configs are not doc-only.
+      if (!opts.unscoped && check.tier !== "syntax" && sourceFiles.length === 0) continue;
       const rel = matching.map((f) => relative(check.cwd, f)).filter((r) => !r.startsWith("..") && !isAbsolute(r)).map((r) => r.split(sep).join("/"));
       if (check.appendFiles && rel.length === 0) {
         if (!opts.unscoped || !check.unscopedArgs) continue;
@@ -121,6 +123,19 @@ export function buildPlan(
     const covered = (p: PlannedCheck) => !p.check.coversWorkspace && !must.has(`${p.check.cwd}::${p.check.id}`) && wide.some((w) => w.check.label === p.check.label && p.check.cwd.startsWith(w.check.cwd + sep));
     for (const p of list.filter(covered)) added.delete(`${p.check.cwd}::${p.check.id}`);
     byTier.set(t, list.filter((p) => !covered(p)));
+  }
+  // Deleted files: a per-file check cannot parse or lint them (`node --check` fails on one), and what imported one is
+  // unknown, so a scoped test run becomes the full run. Unscoped args (".", "-recursive") are not files.
+  const gone = (p: PlannedCheck, f: string) => !p.check.unscopedArgs?.includes(f) && !existsSync(join(p.check.cwd, f));
+  for (const t of TIER_ORDER) {
+    byTier.set(
+      t,
+      byTier.get(t)!.filter((p) => {
+        if (!p.files.some((f) => gone(p, f))) return true;
+        p.files = p.check.appendFiles ? p.files.filter((f) => !gone(p, f)) : [];
+        return !p.check.appendFiles || p.files.length > 0;
+      }),
+    );
   }
   return { byTier, relevantFiles: relevant, ignoredFiles: ignored };
 }

@@ -11,7 +11,7 @@ import { detectCI, detectConventions, detectInstructions, detectRepoShape, detec
 import { detectRust } from "./rust.ts";
 
 /** Bump when detector output changes shape/semantics so caches refresh. */
-export const DETECTOR_VERSION = 14;
+export const DETECTOR_VERSION = 15;
 
 const LANG_EXTS: Record<string, string[]> = { TypeScript: [".ts", ".tsx", ".mts", ".cts"], JavaScript: [".js", ".jsx", ".mjs", ".cjs"], Python: [".py"], Rust: [".rs"], Go: [".go"], Ruby: [".rb"], Java: [".java"], Kotlin: [".kt", ".kts"], Scala: [".scala"], Swift: [".swift"], PHP: [".php"], Elixir: [".ex", ".exs"], Dart: [".dart"], C: [".c", ".h"], "C++": [".cc", ".cpp", ".cxx", ".hpp"], Zig: [".zig"], Haskell: [".hs"], OCaml: [".ml", ".mli"], "C#": [".cs"], "F#": [".fs"], Lua: [".lua"], Perl: [".pl", ".pm"], Erlang: [".erl"], Gleam: [".gleam"], Nim: [".nim"], Julia: [".jl"], R: [".r"], "HCL (Terraform)": [".tf"], Shell: [".sh", ".bash"], Markdown: [".md"] };
 
@@ -221,6 +221,9 @@ function addCiChecks(b: Builder, runs: string[]): void {
   const covered = (tier: Tier, label: string) => b.hasCheckFor(tier, label);
   for (const cmd of runs) {
     if (!ciCommandFitsRoot(b, cmd)) continue;
+    // `pnpm lint` is only as read-only as the script it runs (and the package scripts that one fans out to).
+    const script = cmd.match(/^(?:pnpm|npm|yarn|bun)(?:\s+run)?\s+([\w:.-]+)/)?.[1];
+    if (script && b.unsafeScripts.has(script)) continue;
     let tier: Tier | undefined;
     let label = "ci";
     let tool = "generic";

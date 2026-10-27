@@ -47,6 +47,8 @@ export class Builder {
   generated: string[] = [];
   /** Tracked-file extension histogram (git ls-files), set before detectors run. */
   extCounts: Record<string, number> = {};
+  /** package.json scripts that write files or never exit, directly or in a package they fan out to: a CI step calling one is no check. */
+  unsafeScripts = new Set<string>();
   fingerprintFiles = new Set<string>();
   private textCache = new Map<string, string | undefined>();
 

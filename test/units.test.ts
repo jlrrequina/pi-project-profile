@@ -11,7 +11,7 @@ import { effectiveChecks, renderPromptSection, renderReport, tierAllowed } from 
 import { emptyUserData, isStale, loadOrDetect, updateUser } from "../profile/store.ts";
 import { checkKey, DEFAULT_CONFIG, type Check, type StoredProfile } from "../types.ts";
 import { classifyFailure } from "../verify/classify.ts";
-import { buildPlan, isDocOnly, TIER_ORDER, type Plan } from "../verify/plan.ts";
+import { buildPlan, isDocOnly, TIER_ORDER, type Plan, type PlannedCheck } from "../verify/plan.ts";
 import { pruneOutput, splitLines, stylishHeader } from "../verify/prune.ts";
 import { resolveArgv, resolvePython } from "../verify/resolve.ts";
 import { platformArgv, runCommand } from "../verify/run.ts";
@@ -369,6 +369,16 @@ test("pruneOutput extracts tsc/cargo/pytest diagnostics", () => {
   assert.ok(g.lines.length <= 22);
 });
 
+test("pruneOutput: an error printed by Node's inspect (`Name [Error]: message`) is a diagnostic; stack frames stay capped at 3 per block", () => {
+  // care-prints: `next build` failed on a missing OPENAI_API_KEY; the summary showed 9 frames and not the line saying so
+  const frames = (n: number) => Array.from({ length: n }, (_, i) => (i % 2 ? `    at /app/.next/server/app/api/route.js:1:${2000 + i}` : `    at t (/app/.next/server/webpack-runtime.js:1:${100 + i})`));
+  const log = ["> next build", "   Collecting page data ...", "eN [Error]: Missing credentials. Please pass an `apiKey`, or set the `OPENAI_API_KEY` environment variable.", ...frames(9), "", "> Build error occurred", "[Error: Failed to collect page data for /api/ebook-projects/[id]/poll-segmentation] { type: 'Error' }", " ELIFECYCLE  Command failed with exit code 1."].join("\n");
+  const p = pruneOutput(log);
+  assert.ok(p.lines.some((l) => l.includes("OPENAI_API_KEY")), p.lines.join("\n"));
+  assert.ok(p.lines.some((l) => l.startsWith("[Error: Failed to collect page data")), p.lines.join("\n"));
+  assert.equal(p.lines.filter((l) => /^\s*at\s/.test(l)).length, 3, p.lines.join("\n"));
+});
+
 test("pruneOutput: eslint stylish keeps the file header with its `line:col Warning:` lines; prettier --check lists files; pnpm's ELIFECYCLE is never the only line", () => {
   // `next lint` through pnpm: the wrapper line comes first, the diagnostics use `Warning:`/`Error:` (capitalised, colon).
   const lint = `> web@0.1.0 lint /repo/apps/web\n> next lint\n\n ELIFECYCLE  Command failed with exit code 1.\n\n./app/admin/banner-dialog.tsx\n54:13  Warning: 'React' is not defined.  no-undef\n\n./app/admin/family-circle.tsx\n52:49  Warning: \`"\` can be escaped with \`&quot;\`.  react/no-unescaped-entities\n60:43  Error: React Hook "useFamilyCircle" is called conditionally.  react-hooks/rules-of-hooks\n`;
@@ -430,7 +440,44 @@ test("buildPlan groups by project dir, filters by extension, handles doc-only ch
   assert.ok(fast.some((p) => p.check.cwd === root));
   const docOnly = buildPlan([join(root, "docs/a.md")], { projectRoot: root, gitRoot: root, ignoreDirs: DEFAULT_CONFIG.ignoreDirs, profileFor, checksFor: (s) => effectiveChecks(s) });
   assert.equal([...docOnly.byTier.values()].flat().length, 0);
+  // a check that also reads .md/.yml/.json files (a lint script) is no reason to lint for a README or a lockfile alone
+  write(root, "package-lock.json", "{}");
+  write(root, ".github/workflows/ci.yml", "on: push\n");
+  const lint: Check = { id: "node:lint", tier: "lint", label: "lint", cmd: "npm run lint", argv: ["npm", "run", "lint"], cwd: root, source: "t", exts: [".ts", ".json", ".md", ".yml"] };
+  const withLint = (files: string[]) => [...buildPlan(files.map((f) => join(root, f)), { projectRoot: root, gitRoot: root, ignoreDirs: DEFAULT_CONFIG.ignoreDirs, profileFor, checksFor: (s) => (s.detected.root === root ? [...effectiveChecks(s), lint] : effectiveChecks(s)) }).byTier.values()].flat().map((p) => p.check.id).sort();
+  assert.deepEqual(withLint(["README.md"]), []);
+  assert.deepEqual(withLint(["package-lock.json"]), ["json:syntax"]);
+  assert.deepEqual(withLint(["README.md", "src/y.ts"]), ["node:lint", "node:test", "node:typecheck"]);
+  assert.deepEqual(withLint([".github/workflows/ci.yml"]), ["node:lint", "node:test"]);
   assert.ok(isDocOnly("/x/pnpm-lock.yaml") && isDocOnly("/x/a.md") && !isDocOnly("/x/a.ts"));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("per-file checks get only the changed files that still exist; a scoped test run that involves a deleted file runs in full", () => {
+  const root = tmp();
+  mkdirSync(join(root, ".git"));
+  write(root, "package.json", JSON.stringify({ name: "x", scripts: { test: "vitest run" }, devDependencies: { vitest: "2" } }));
+  write(root, "package-lock.json", "{}");
+  write(root, "scripts/keep.mjs", "export {};\n");
+  write(root, "src/a.ts", "export {};\n");
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const stored: StoredProfile = { detected: detectProject(root, config, root), user: emptyUserData(), updatedAt: "" };
+  const opts = { projectRoot: root, gitRoot: root, ignoreDirs: DEFAULT_CONFIG.ignoreDirs, profileFor: () => stored, checksFor: (s: StoredProfile) => effectiveChecks(s) };
+  // care-prints: a worktree removed after its merge sent `node --check` a file that no longer existed ("Cannot find module")
+  const gone = join(root, "scripts/test-activity-preview.mjs");
+  const syntax = (files: string[], mustRun?: PlannedCheck[]) => buildPlan(files, { ...opts, mustRun }).byTier.get("syntax")!;
+  assert.deepEqual(syntax([gone, join(root, "scripts/keep.mjs")]).map((p) => [p.check.id, p.files]), [["node:syntax", ["scripts/keep.mjs"]]]);
+  assert.deepEqual(syntax([gone, join(root, "config/gone.json")]), []);
+  // a repair round re-runs a failing per-file check with its old file list: deleted files drop out there too
+  const nodeSyntax = stored.detected.checks.find((c) => c.id === "node:syntax")!;
+  assert.deepEqual(syntax([], [{ check: nodeSyntax, files: ["scripts/test-activity-preview.mjs"] }]), []);
+  // what imported a deleted file is unknown: the related-tests run becomes the full run (no files)
+  const testFiles = (files: string[]) => buildPlan(files, opts).byTier.get("test")!.map((p) => p.files);
+  assert.deepEqual(testFiles([join(root, "src/a.ts")]), [["src/a.ts"]]);
+  assert.deepEqual(testFiles([join(root, "src/a.ts"), join(root, "src/deleted.ts")]), [[]]);
+  // unscoped args are flags or ".", never files to look for
+  const tf: Check = { id: "tf:fmt", tier: "lint", label: "format", cmd: "terraform fmt -check <files>", argv: ["terraform", "fmt", "-check"], cwd: root, source: "t", appendFiles: true, unscopedArgs: ["-recursive"], exts: [".tf"] };
+  assert.deepEqual(buildPlan([], { ...opts, checksFor: () => [tf], unscoped: true }).byTier.get("lint")!.map((p) => p.files), [["-recursive"]]);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -476,6 +523,43 @@ test("pnpm workspace: package files run the package's own typecheck with the wor
   const p3 = buildPlan([join(root, "packages/a/src/index.ts"), join(root, "packages/b/src/index.ts")], opts).byTier.get("fast")!;
   assert.deepEqual(p3.map((p) => relOf(root, p.check.cwd)).sort(), ["packages/a", "packages/b"]);
   rmSync(root, { recursive: true, force: true });
+});
+
+test("a workspace-wide script that runs a package's auto-fixing or watching script is no check, neither from scripts nor from CI; the packages keep their own read-only checks", () => {
+  const root = tmp();
+  mkdirSync(join(root, ".git"));
+  // care-prints: root `turbo run lint` runs apps/backend's `eslint … --fix`, which rewrote 33 files during one session
+  write(root, "package.json", JSON.stringify({ name: "ws", private: true, packageManager: "pnpm@10.0.0", scripts: { lint: "turbo run lint", typecheck: "turbo run typecheck", test: "turbo run test", "format:check": "pnpm -r run format:check" }, devDependencies: { turbo: "2", typescript: "5" } }));
+  write(root, "pnpm-workspace.yaml", "packages:\n  - 'apps/*'\n");
+  write(root, "pnpm-lock.yaml", "");
+  write(root, "apps/backend/package.json", JSON.stringify({ name: "backend", scripts: { lint: 'eslint "{src,test}/**/*.ts" --fix', typecheck: "tsc --noEmit", test: "jest", "format:check": "prettier --check src" }, devDependencies: { eslint: "9", typescript: "5", jest: "29" } }));
+  write(root, "apps/backend/eslint.config.mjs", "export default []");
+  write(root, "apps/web/package.json", JSON.stringify({ name: "web", scripts: { lint: "next lint", typecheck: "tsc --noEmit", test: "jest --watch", "format:check": "prettier --check ." } }));
+  write(root, ".github/workflows/ci.yml", "jobs:\n  ci:\n    steps:\n      - run: pnpm install\n      - run: pnpm lint\n      - run: pnpm run typecheck\n");
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const p = detectProject(root, config);
+  assert.ok(!p.checks.some((c) => c.label === "lint"), p.checks.map((c) => c.cmd).join(" | "));
+  assert.ok(p.notes.some((n) => n.includes("scripts.lint") && n.includes("apps/backend") && n.includes("--fix")), p.notes.join("\n"));
+  // a package script in watch mode would hang the gate until its timeout
+  assert.ok(!p.checks.some((c) => c.label === "test"));
+  assert.ok(p.notes.some((n) => n.includes("scripts.test") && n.includes("apps/web") && n.includes("watch")), p.notes.join("\n"));
+  // read-only all the way down: still the workspace-wide check
+  assert.equal(p.checks.find((c) => c.id === "node:typecheck")?.coversWorkspace, true);
+  assert.equal(p.checks.find((c) => c.id === "node:format-check")?.coversWorkspace, true);
+  // the command stays documented for the agent
+  assert.equal(p.commands["lint"]?.cmd, "pnpm run lint");
+  // the backend keeps a read-only lint of its own, on the changed files
+  const backend = detectProject(join(root, "apps/backend"), config, root);
+  assert.deepEqual(backend.checks.filter((c) => c.label === "lint").map((c) => [c.cmd, !!c.appendFiles]), [["pnpm exec eslint --no-warn-ignored --max-warnings=1000000 <files>", true]]);
+  // a direct auto-fix script reached through CI is no check either
+  const single = tmp();
+  write(single, "package.json", JSON.stringify({ name: "s", scripts: { lint: "eslint --fix ." }, devDependencies: { eslint: "9" } }));
+  write(single, "package-lock.json", "{}");
+  write(single, ".github/workflows/ci.yml", "jobs:\n  ci:\n    steps:\n      - run: npm run lint\n      - run: pnpm lint\n");
+  mkdirSync(join(single, "node_modules"), { recursive: true });
+  assert.ok(!detectProject(single, config).checks.some((c) => c.label === "lint" && c.source === "CI workflow"));
+  rmSync(root, { recursive: true, force: true });
+  rmSync(single, { recursive: true, force: true });
 });
 
 test("a workspace root's bare tsconfig (extends + compilerOptions only) gets no synthesized tsc; a single package's does", () => {
@@ -643,6 +727,25 @@ test("gate: read-only checks in one tier run in parallel; the verdict keeps plan
   rmSync(root, { recursive: true, force: true });
 });
 
+test("JSON syntax: tool configs may be JSONC (comments, trailing commas); manifests and data files stay strict JSON", async () => {
+  const root = tmp();
+  // care-prints: oxlint reads comments in .oxlintrc.json; the strict parse sent the agent into the extension's source
+  write(root, ".oxlintrc.json", '{\n  // why this rule is off\n  "rules": { "no-console": "off" },\n}\n');
+  write(root, "tsconfig.app.json", '{ "compilerOptions": { /* strict */ "strict": true, }, }');
+  write(root, "turbo.json", '{ // tasks\n "tasks": {} }');
+  write(root, ".vscode/settings.json", '{ "a": 1, // x\n}');
+  write(root, "package.json", '{ "name": "x" // npm rejects this\n}');
+  write(root, "locales/en.json", '{ "hello": "Hi", }');
+  write(root, ".eslintrc.json", '{ "rules": { ');
+  write(root, "data.json5", "{ unquoted: 'json5' }");
+  const json: Check = { id: "json:syntax", tier: "syntax", label: "syntax", cmd: "JSON.parse <files>", argv: ["__internal_json__"], cwd: root, source: "built-in", appendFiles: true, exts: [".json"], tool: "json" };
+  const files = [".oxlintrc.json", "tsconfig.app.json", "turbo.json", ".vscode/settings.json", "package.json", "locales/en.json", ".eslintrc.json", "data.json5"];
+  const run = await runCheck({ check: json, files }, config, { permission: async () => "allow", broken: new Map() });
+  assert.equal(run.status, "fail");
+  assert.deepEqual(run.summary.map((l) => l.slice(0, l.indexOf(":"))).sort(), [".eslintrc.json", "locales/en.json", "package.json"]);
+  rmSync(root, { recursive: true, force: true });
+});
+
 // ---------------------------------------------------------------- diff guard + fix hints
 test("addedLines is a multiset diff: moved lines are not added, repeated ones are", () => {
   assert.deepEqual(addedLines("a\nb\nc\n", "c\na\nb\n"), []);
@@ -698,6 +801,58 @@ test("diff guard: suppressions, focus/skip, stubs, loosened configs, removed/del
   const again = collectFindings({ root, files: [...files, join(root, "pnpm-lock.yaml")], before: (abs) => (before.has(abs) ? before.get(abs)! : SKIP) });
   assert.ok(!again.some((f) => f.kind === "lockfile" && f.file === "package.json"));
   assert.equal(collectFindings({ root, files, before: () => SKIP }).filter((f) => f.kind !== "deleted-test").length, 0);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("diff guard: Jasmine-style fit/xit need a test name; a function called fit is no focused test", () => {
+  const root = tmp();
+  // ~/projects: a curve-fitting prototype printed `${fit(a)}`, and the agent got a follow-up turn to remove a `.only`
+  write(root, "experiments/prototype.mjs", "const fit = (a) => a;\nconsole.log(`    today's refit       ${row(a)} · ${fit(a)} · ${base.toFixed(1)} topics after`);\n");
+  write(root, "src/a.spec.ts", "fit('runs alone', () => {});\nxit(`is skipped`, () => {});\nfdescribe(\"suite\", () => {});\n");
+  const files = [join(root, "experiments/prototype.mjs"), join(root, "src/a.spec.ts")];
+  const found = collectFindings({ root, files, before: () => "" });
+  assert.deepEqual(found.map((f) => [f.kind, f.file, f.lines]), [["focus", "src/a.spec.ts", [1, 3]], ["skip", "src/a.spec.ts", [2]]]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("diff guard (JS): a marker in a string or in the middle of a comment is no marker; a directive that opens a comment and a test call in code are", () => {
+  const root = tmp();
+  // this repository's own test titles, fixture strings and comments, as the gate reviewed them
+  const mentions = [
+    "test(\"weakening counts as gaming only when it can hide the check that failed: a lint suppression next to a typecheck fix is shown, a @ts-ignore gets a follow-up\", async () => {",
+    "  for (const [added, gamed] of [[\"// eslint-disable-next-line no-console\", false], [\"// @ts-ignore\", true]] as const) {",
+    "    // care-prints: eslint-disables added while the tests failed got \"remove them and fix the underlying problem\"",
+    "  // ~/projects: a curve-fitting prototype printed `${fit(a)}`, and the agent got a follow-up turn to remove a `.only`",
+    "  write(root, \"src/a.spec.ts\", \"fit('runs alone', () => {});\\nxit(`is skipped`, () => {});\\nfdescribe(\\\"suite\\\", () => {});\\n\");",
+    "      // Jasmine-style fit/xit take a test name first: `fit(a)` is just a function called fit.",
+  ];
+  const markers = ["// @ts-ignore", "foo(); // eslint-disable-line no-console", "{/* eslint-disable-next-line react/no-danger */}", "it.only(\"real\", () => {});", "fit('real', () => {});", "  test.describe.only(`suite ${n}`, () => {});"];
+  write(root, "test/x.test.ts", [...mentions, ...markers].join("\n") + "\n");
+  const found = collectFindings({ root, files: [join(root, "test/x.test.ts")], before: () => "" });
+  const at = (n: number) => mentions.length + n;
+  assert.deepEqual(found.map((f) => `${f.what}: ${f.lines.join(",")}`).sort(), [`TypeScript error suppressed: ${at(1)}`, `focused test (.only): the rest of the suite stops running: ${at(4)},${at(5)},${at(6)}`, `lint rule disabled inline: ${at(2)},${at(3)}`].sort());
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("diff guard: a test file deleted with its whole worktree or checkout is no test deletion; a tracked test deleted with its directory still is", () => {
+  const root = tmp();
+  const { execSync } = process.getBuiltinModule("node:child_process") as typeof import("node:child_process");
+  const git = (cmd: string, cwd = root) => execSync(`git -c user.name=t -c user.email=t@t ${cmd}`, { cwd, stdio: "ignore" });
+  git("init -q");
+  write(root, ".gitignore", ".claude/\n");
+  write(root, "legacy/old.test.ts", "it('x', () => {});\n");
+  write(root, "src/keep.ts", "export {};\n");
+  git("add -A");
+  git("commit -q -m init");
+  // care-prints: `git worktree remove` after the merge reported 9 deleted tests and demanded their restoration
+  const wt = join(root, ".claude/worktrees/story-activities");
+  write(wt, "apps/web/__tests__/story.test.tsx", "it('y', () => {});\n");
+  git("init -q", wt);
+  const files = [join(wt, "apps/web/__tests__/story.test.tsx"), join(root, "legacy/old.test.ts")];
+  rmSync(wt, { recursive: true, force: true });
+  rmSync(join(root, "legacy"), { recursive: true, force: true });
+  const found = collectFindings({ root, gitRoot: root, files, before: () => "it('x', () => {});\n" });
+  assert.deepEqual(found.map((f) => [f.kind, f.file]), [["deleted-test", "legacy/old.test.ts"]]);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -987,6 +1142,32 @@ test("runCommand: exit codes, timeout kills process group, output capture", asyn
 });
 
 // ---------------------------------------------------------------- late binding + guards
+test("a missing executable is named as the cause instead of the check's other requirement, and is found once it is installed", () => {
+  const bin = tmp();
+  const prev = process.env.PATH;
+  process.env.PATH = bin;
+  clearWhichCache();
+  try {
+    // live-and-stay: π ran on a Node without pnpm; the gate said "dependencies not installed — run `pnpm install`" with node_modules in place
+    const check: Check = { id: "node:typecheck", tier: "fast", label: "typecheck", cmd: "pnpm run typecheck", argv: ["pnpm", "run", "typecheck"], cwd: bin, source: "t", requires: { files: ["node_modules"], hint: "dependencies not installed — run `pnpm install`" } };
+    const missing = resolveArgv(check).missing ?? "";
+    assert.ok(missing.startsWith("`pnpm` not found on PATH") && missing.includes("corepack enable pnpm") && !missing.includes("dependencies"), missing);
+    // a hint about the executable itself stays; one about something else does not
+    assert.equal(resolveArgv({ ...check, argv: ["cargo", "check"], requires: { bin: "cargo", hint: "cargo not found on PATH (install rustup)" } }).missing, "cargo not found on PATH (install rustup)");
+    assert.equal(resolveArgv({ ...check, argv: ["cargo", "fmt"], requires: { bin: "cargo", hint: "rustfmt component missing (rustup component add rustfmt)" } }).missing, "`cargo` not found on PATH");
+    // installed mid-session (`corepack enable pnpm`): found without restarting π
+    writeFileSync(join(bin, IS_WIN ? "pnpm.cmd" : "pnpm"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    assert.equal(resolveArgv(check).missing, undefined);
+    // a relative executable belongs to the check's directory, not to π's working directory
+    writeFileSync(join(bin, IS_WIN ? "gradlew.bat" : "gradlew"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+    assert.equal(resolveArgv({ ...check, argv: ["./gradlew", "check"], requires: {} }).missing, undefined);
+  } finally {
+    process.env.PATH = prev;
+    clearWhichCache();
+    rmSync(bin, { recursive: true, force: true });
+  }
+});
+
 test("resolveArgv binds node_modules/.bin and python tools at run time", () => {
   const root = tmp();
   const base = { id: "x", tier: "fast" as const, label: "x", cmd: "x", cwd: root, source: "t" };
@@ -1045,6 +1226,35 @@ test("peekChanges reports files changed since the prompt snapshot without consum
   const collected = await collectChanges(t);
   assert.deepEqual(collected.files.map((f) => relOf(root, f)), ["b.txt"]);
   assert.equal(collected.gitDetected, 1);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("change detection compares content, not git status: staging or committing is no change; editing, reverting and deleting are", async () => {
+  const root = tmp();
+  const { execSync } = process.getBuiltinModule("node:child_process") as typeof import("node:child_process");
+  const git = (cmd: string) => execSync(`git -c user.name=t -c user.email=t@t ${cmd}`, { cwd: root, stdio: "ignore" });
+  git("init -q");
+  write(root, "a.ts", "1\n");
+  write(root, "gone.test.ts", "it('x', () => {});\n");
+  git("add -A");
+  git("commit -q -m init");
+  // dirty when the prompt starts: a modified file, a deleted test, an untracked file
+  write(root, "a.ts", "22\n");
+  rmSync(join(root, "gone.test.ts"));
+  write(root, "new.ts", "3\n");
+  const t = newTracker(root);
+  await snapshotStart(t);
+  // live-and-stay: a deletion left by the previous session, committed in this one, was reported as "test file deleted"
+  git("add -A");
+  assert.deepEqual(await peekChanges(t), [], "staging changes no content");
+  git("commit -q -m wip");
+  assert.deepEqual((await collectChanges(t)).files, [], "committing changes no content");
+  write(root, "a.ts", "4444\n");
+  assert.deepEqual((await collectChanges(t)).files.map((f) => relOf(root, f)), ["a.ts"]);
+  git("checkout -- a.ts");
+  assert.deepEqual((await collectChanges(t)).files.map((f) => relOf(root, f)), ["a.ts"], "a revert changes content");
+  rmSync(join(root, "new.ts"));
+  assert.deepEqual((await collectChanges(t)).files.map((f) => relOf(root, f)), ["new.ts"]);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -1118,6 +1328,7 @@ test("scoped test runs end to end: detector → plan (files kept, mustRun merged
   write(root, "pnpm-lock.yaml", "");
   write(root, "src/a.ts", "");
   write(root, "src/b.ts", "");
+  write(root, "vite.config.ts", "");
   mkdirSync(join(root, "node_modules", ".bin"), { recursive: true });
   // fake vitest: print its argv and fail, so the args land in the pruned summary
   writeFileSync(join(root, "node_modules", ".bin", "vitest"), '#!/bin/sh\necho "FAIL argv: $*"\nexit 1\n', { mode: 0o755 });

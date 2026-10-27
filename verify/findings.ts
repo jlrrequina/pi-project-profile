@@ -15,6 +15,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync, statSync } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
+import type { Tier } from "../types.ts";
 
 export type FindingKind = "secret" | "env-file" | "lockfile" | "focus" | "suppression" | "skip" | "stub" | "loosen" | "deleted-test" | "removed-tests";
 
@@ -29,8 +30,16 @@ export interface Finding {
   sample?: string;
   /** Command that fixes it, when there is one. */
   fix?: string;
+  /** Tiers whose failures this change can hide: a lint suppression cannot make a failing test pass. */
+  hides: Tier[];
   key: string;
 }
+
+/** What each kind can hide unless its pattern says otherwise. */
+const HIDES: Record<FindingKind, Tier[]> = { secret: [], "env-file": [], lockfile: [], focus: ["test"], suppression: ["lint"], skip: ["test"], stub: ["fast", "test"], loosen: ["lint"], "deleted-test": ["test"], "removed-tests": ["test"] };
+const TYPES: Tier[] = ["fast"];
+const TYPES_AND_LINT: Tier[] = ["fast", "lint"];
+const COVERAGE: Tier[] = ["test"];
 
 /** Content that exists but cannot be analysed (binary, too large, unknown history). */
 export const SKIP = "\u0000skip";
@@ -77,29 +86,59 @@ interface Pat {
   kind: FindingKind;
   re: RegExp;
   what: string;
+  /** When it differs from HIDES[kind]. */
+  hides?: Tier[];
 }
 
 const JS = /\.(ts|tsx|js|jsx|mjs|cjs|mts|cts|vue|svelte|astro)$/i;
+
+/**
+ * A JS line as the tools read it: `code` with string contents blanked (quotes kept), and `directive`, the text of the
+ * first comment outside strings without its `//` or `/*`. ESLint, TypeScript and Biome honour a directive only at
+ * the start of a comment, so a marker inside a string or in the middle of a comment is no marker.
+ */
+export function jsLine(line: string): { code: string; directive: string } {
+  let code = "";
+  let quote = "";
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i]!;
+    if (quote) {
+      if (c === "\\") {
+        code += "  ";
+        i++;
+      } else if (c === quote) {
+        quote = "";
+        code += c;
+      } else code += " ";
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") quote = c;
+    else if (c === "/" && (line[i + 1] === "/" || line[i + 1] === "*")) return { code, directive: line.slice(i).replace(/^\/(\/+|\*+)\s*/, "") };
+    code += c;
+  }
+  return { code, directive: "" };
+}
 
 const CODE_PATTERNS: Array<[RegExp, Pat[]]> = [
   [
     JS,
     [
-      { kind: "suppression", re: /@ts-(ignore|nocheck|expect-error)\b/, what: "TypeScript error suppressed" },
+      { kind: "suppression", re: /@ts-(ignore|nocheck|expect-error)\b/, what: "TypeScript error suppressed", hides: TYPES },
       { kind: "suppression", re: /\b(eslint|oxlint)-disable/, what: "lint rule disabled inline" },
       { kind: "suppression", re: /\bbiome-ignore\b/, what: "Biome rule ignored inline" },
-      { kind: "suppression", re: /\b(istanbul|c8|v8) ignore\b/, what: "code excluded from coverage" },
-      { kind: "focus", re: /\b(it|test|describe|suite|context)\.only\s*\(|\b(fit|fdescribe)\s*\(/, what: "focused test (.only): the rest of the suite stops running" },
-      { kind: "skip", re: /\b(it|test|describe|suite|context)\.(skip|todo)\s*\(|\b(xit|xtest|xdescribe)\s*\(/, what: "test skipped" },
+      { kind: "suppression", re: /\b(istanbul|c8|v8) ignore\b/, what: "code excluded from coverage", hides: COVERAGE },
+      // Jasmine-style fit/xit take a test name first: `fit(a)` is just a function called fit.
+      { kind: "focus", re: /\b(it|test|describe|suite|context)\.only\s*\(|\b(fit|fdescribe)\s*\(\s*['"`]/, what: "focused test (.only): the rest of the suite stops running" },
+      { kind: "skip", re: /\b(it|test|describe|suite|context)\.(skip|todo)\s*\(|\b(xit|xtest|xdescribe)\s*\(\s*['"`]/, what: "test skipped" },
       { kind: "stub", re: /throw new Error\(\s*['"`](not implemented|unimplemented|todo)\b/i, what: "stub left in (throws 'not implemented')" },
     ],
   ],
   [
     /\.pyi?$/i,
     [
-      { kind: "suppression", re: /#\s*type:\s*ignore\b/, what: "type error suppressed" },
-      { kind: "suppression", re: /#\s*(noqa\b|pyright:\s*ignore|pylint:\s*disable|mypy:\s*ignore-errors)/, what: "lint/type check suppressed inline" },
-      { kind: "suppression", re: /#\s*pragma:\s*no\s*cover\b/, what: "code excluded from coverage" },
+      { kind: "suppression", re: /#\s*type:\s*ignore\b/, what: "type error suppressed", hides: TYPES },
+      { kind: "suppression", re: /#\s*(noqa\b|pyright:\s*ignore|pylint:\s*disable|mypy:\s*ignore-errors)/, what: "lint/type check suppressed inline", hides: TYPES_AND_LINT },
+      { kind: "suppression", re: /#\s*pragma:\s*no\s*cover\b/, what: "code excluded from coverage", hides: COVERAGE },
       { kind: "skip", re: /@pytest\.mark\.(skip|xfail)\b|\bpytest\.skip\(|@unittest\.skip/, what: "test skipped or xfailed" },
       { kind: "stub", re: /\braise NotImplementedError\b/, what: "stub left in (NotImplementedError)" },
     ],
@@ -107,7 +146,7 @@ const CODE_PATTERNS: Array<[RegExp, Pat[]]> = [
   [
     /\.rs$/i,
     [
-      { kind: "suppression", re: /#!?\[allow\(/, what: "compiler/clippy lint allowed" },
+      { kind: "suppression", re: /#!?\[allow\(/, what: "compiler/clippy lint allowed", hides: TYPES_AND_LINT },
       { kind: "skip", re: /#\[ignore\b/, what: "test ignored" },
       { kind: "stub", re: /\b(todo|unimplemented)!\s*\(/, what: "stub left in (todo!/unimplemented!)" },
     ],
@@ -131,7 +170,7 @@ const CODE_PATTERNS: Array<[RegExp, Pat[]]> = [
   [
     /\.(java|kt|kts)$/i,
     [
-      { kind: "suppression", re: /@Suppress(Warnings)?\s*\(/, what: "compiler warning suppressed" },
+      { kind: "suppression", re: /@Suppress(Warnings)?\s*\(/, what: "compiler warning suppressed", hides: TYPES_AND_LINT },
       { kind: "skip", re: /@(Disabled|Ignore)\b/, what: "test disabled" },
       { kind: "stub", re: /throw (new )?(UnsupportedOperationException|NotImplementedError)\(\s*"?(not implemented|todo)?|\bTODO\(\s*\)/i, what: "stub left in" },
     ],
@@ -139,7 +178,7 @@ const CODE_PATTERNS: Array<[RegExp, Pat[]]> = [
   [
     /\.cs$/i,
     [
-      { kind: "suppression", re: /#pragma warning disable|\[SuppressMessage\(/, what: "compiler warning suppressed" },
+      { kind: "suppression", re: /#pragma warning disable|\[SuppressMessage\(/, what: "compiler warning suppressed", hides: TYPES_AND_LINT },
       { kind: "skip", re: /\[(Ignore|Explicit)\b|\bSkip\s*=\s*"/, what: "test skipped" },
       { kind: "stub", re: /throw new NotImplementedException/, what: "stub left in (NotImplementedException)" },
     ],
@@ -155,28 +194,28 @@ const CODE_PATTERNS: Array<[RegExp, Pat[]]> = [
   [
     /\.php$/i,
     [
-      { kind: "suppression", re: /@phpstan-ignore|@psalm-suppress|phpcs:(ignore|disable)|@codingStandardsIgnore/, what: "static analysis suppressed inline" },
+      { kind: "suppression", re: /@phpstan-ignore|@psalm-suppress|phpcs:(ignore|disable)|@codingStandardsIgnore/, what: "static analysis suppressed inline", hides: TYPES_AND_LINT },
       { kind: "skip", re: /markTest(Skipped|Incomplete)\s*\(|->skip\(\s*\)/, what: "test skipped" },
     ],
   ],
   [/\.(sh|bash|zsh)$/i, [{ kind: "suppression", re: /#\s*shellcheck\s+disable=/, what: "ShellCheck rule disabled inline" }]],
   [/\.(ex|exs)$/i, [{ kind: "skip", re: /@(module)?tag\s+:skip\b/, what: "test skipped" }]],
-  [/\.(c|cc|cpp|cxx|h|hpp)$/i, [{ kind: "suppression", re: /NOLINT|#pragma (GCC|clang) diagnostic ignored/, what: "compiler/lint warning suppressed" }]],
+  [/\.(c|cc|cpp|cxx|h|hpp)$/i, [{ kind: "suppression", re: /NOLINT|#pragma (GCC|clang) diagnostic ignored/, what: "compiler/lint warning suppressed", hides: TYPES_AND_LINT }]],
 ];
 
-/** [path pattern, added-line pattern, what] — configuration changes that make checks weaker. */
-const LOOSEN: Array<[RegExp, RegExp, string]> = [
-  [/(^|\/)(tsconfig|jsconfig)[^/]*\.json$/, /"(strict|noImplicitAny|strictNullChecks|strictFunctionTypes|noUnusedLocals|noUnusedParameters|noImplicitReturns|noUncheckedIndexedAccess|noFallthroughCasesInSwitch|exactOptionalPropertyTypes|useUnknownInCatchVariables)"\s*:\s*false/, "TypeScript strictness turned off"],
+/** [path pattern, added-line pattern, what, hides (default lint)] — configuration changes that make checks weaker. */
+const LOOSEN: Array<[RegExp, RegExp, string, Tier[]?]> = [
+  [/(^|\/)(tsconfig|jsconfig)[^/]*\.json$/, /"(strict|noImplicitAny|strictNullChecks|strictFunctionTypes|noUnusedLocals|noUnusedParameters|noImplicitReturns|noUncheckedIndexedAccess|noFallthroughCasesInSwitch|exactOptionalPropertyTypes|useUnknownInCatchVariables)"\s*:\s*false/, "TypeScript strictness turned off", TYPES],
   [/(^|\/)(eslint\.config\.[cm]?[jt]s|\.eslintrc(\.[a-z]+)?)$/, /:\s*\[?\s*(['"]off['"]|0)\s*[,\]}]?\s*,?\s*$/, "ESLint rule turned off"],
   [/(^|\/)biome\.jsonc?$/, /:\s*"off"|"recommended"\s*:\s*false|"enabled"\s*:\s*false/, "Biome rule or linter turned off"],
-  [/(^|\/)(pyproject\.toml|setup\.cfg|mypy\.ini|\.mypy\.ini|tox\.ini|\.flake8|ruff\.toml|\.ruff\.toml)$/, /^\s*(ignore_errors\s*=\s*true|follow_imports\s*=\s*["']?skip)|^\s*(strict|disallow_untyped_defs|check_untyped_defs|warn_return_any)\s*=\s*false|^\s*(extend-)?ignore\s*=|^\s*per-file-ignores\b/i, "Python lint/type-check rules relaxed"],
-  [/(^|\/)(Cargo\.toml|clippy\.toml|\.clippy\.toml)$/, /=\s*["']allow["']|level\s*=\s*["']allow["']/, "Rust lint set to allow"],
-  [/(^|\/)package\.json$/, /"(test|lint|typecheck|type-check|check)[^"]*"\s*:\s*"[^"]*(\|\|\s*(true|exit 0)|--passWithNoTests\b|;\s*exit 0)/, "check script can no longer fail"],
-  [/(^|\/)(\.github\/workflows\/[^/]+\.ya?ml|\.gitlab-ci\.yml|azure-pipelines\.yml|\.circleci\/config\.yml)$/, /continue-on-error:\s*true|allow_failure:\s*true|\|\|\s*true\b/, "CI step allowed to fail"],
+  [/(^|\/)(pyproject\.toml|setup\.cfg|mypy\.ini|\.mypy\.ini|tox\.ini|\.flake8|ruff\.toml|\.ruff\.toml)$/, /^\s*(ignore_errors\s*=\s*true|follow_imports\s*=\s*["']?skip)|^\s*(strict|disallow_untyped_defs|check_untyped_defs|warn_return_any)\s*=\s*false|^\s*(extend-)?ignore\s*=|^\s*per-file-ignores\b/i, "Python lint/type-check rules relaxed", TYPES_AND_LINT],
+  [/(^|\/)(Cargo\.toml|clippy\.toml|\.clippy\.toml)$/, /=\s*["']allow["']|level\s*=\s*["']allow["']/, "Rust lint set to allow", TYPES_AND_LINT],
+  [/(^|\/)package\.json$/, /"(test|lint|typecheck|type-check|check)[^"]*"\s*:\s*"[^"]*(\|\|\s*(true|exit 0)|--passWithNoTests\b|;\s*exit 0)/, "check script can no longer fail", ["syntax", "fast", "lint", "test", "build"]],
+  [/(^|\/)(\.github\/workflows\/[^/]+\.ya?ml|\.gitlab-ci\.yml|azure-pipelines\.yml|\.circleci\/config\.yml)$/, /continue-on-error:\s*true|allow_failure:\s*true|\|\|\s*true\b/, "CI step allowed to fail", []],
   [/(^|\/)\.golangci\.(ya?ml|toml|json)$/, /^\s*disable-all:\s*true|^\s*issues-exit-code:\s*0/, "golangci-lint relaxed"],
   [/(^|\/)\.rubocop\.yml$/, /^\s*Enabled:\s*false/, "RuboCop cop disabled"],
-  [/(^|\/)phpstan\.neon(\.dist)?$/, /^\s*level:\s*[0-4]\b|^\s*ignoreErrors:/, "PHPStan relaxed"],
-  [/(^|\/)(jest|vitest)\.config\.[cm]?[jt]s$/, /passWithNoTests:\s*true|(coverageThreshold|thresholds)\b.*:\s*0\b/, "test configuration relaxed"],
+  [/(^|\/)phpstan\.neon(\.dist)?$/, /^\s*level:\s*[0-4]\b|^\s*ignoreErrors:/, "PHPStan relaxed", TYPES],
+  [/(^|\/)(jest|vitest)\.config\.[cm]?[jt]s$/, /passWithNoTests:\s*true|(coverageThreshold|thresholds)\b.*:\s*0\b/, "test configuration relaxed", COVERAGE],
 ];
 
 export const TEST_FILE_RE = /(^|\/)(__tests__|__test__|tests?|spec|specs)\/|\.(test|spec)\.[cm]?[jt]sx?$|(^|\/)test_[^/]+\.py$|_test\.py$|_test\.go$|_(spec|test)\.rb$|Tests?\.(java|kt|cs|swift)$|Test\.php$|_test\.exs$/;
@@ -310,6 +349,24 @@ function findLock(manifestAbs: string, rule: LockRule, stop: string): { abs: str
   return undefined;
 }
 
+/**
+ * A deleted file is a change to a repository when its directory is still there or a repository around it tracks it.
+ * A removed worktree or clone takes its whole directory along, and the checkout around it never tracked those files.
+ */
+function deletedFromRepository(abs: string): boolean {
+  let dir = dirname(abs);
+  if (existsSync(dir)) return true;
+  while (!existsSync(dir)) {
+    const up = dirname(dir);
+    if (up === dir) return false;
+    dir = up;
+  }
+  // Relative to the directory that still exists, so git resolves the path itself (no /private/var or 8.3-name mismatch).
+  const rel = relative(dir, abs).split(sep).join("/");
+  const git = (args: string[]) => spawnSync("git", args, { cwd: dir, timeout: 5000 }).status === 0;
+  return git(["ls-files", "--error-unmatch", "--", rel]) || git(["cat-file", "-e", `HEAD:./${rel}`]);
+}
+
 function countCases(file: string, text: string): number | undefined {
   const rule = CASES.find(([re]) => re.test(file));
   if (!rule) return undefined;
@@ -349,7 +406,7 @@ export function collectFindings(input: FindingsInput): Finding[] {
       existing.lines.push(...lines);
       return;
     }
-    out.push({ kind, file, what, lines: [...lines], key: "", ...extra });
+    out.push({ kind, file, what, lines: [...lines], hides: HIDES[kind], key: "", ...extra });
   };
   const changed = new Set(input.files);
   for (const abs of input.files.slice(0, 300)) {
@@ -358,7 +415,7 @@ export function collectFindings(input: FindingsInput): Finding[] {
     const before = input.before(abs);
     if (after === null) {
       // Deleted during the task.
-      if (before !== null && TEST_FILE_RE.test(file) && CODE_EXT.test(file)) add("deleted-test", file, "test file deleted", []);
+      if (before !== null && TEST_FILE_RE.test(file) && CODE_EXT.test(file) && deletedFromRepository(abs)) add("deleted-test", file, "test file deleted", []);
       continue;
     }
     if (after === SKIP || before === SKIP) continue;
@@ -380,13 +437,19 @@ export function collectFindings(input: FindingsInput): Finding[] {
     if (/^\.env(\.[\w.-]+)?$/.test(name) && !/\.(example|sample|template|dist|defaults)$/i.test(name) && input.ignored?.(abs) === false) add("env-file", file, "environment file is not gitignored (it would be committed)", []);
     // suppressions, skips, focus, stubs
     const pats = CODE_PATTERNS.find(([re]) => re.test(file))?.[1] ?? [];
+    const js = JS.test(file);
     for (const { line, text } of added) {
-      for (const p of pats) if (p.re.test(text)) add(p.kind, file, p.what, [line], { sample: text.trim().slice(0, 90) });
+      const parts = js ? jsLine(text) : undefined;
+      for (const p of pats) {
+        // JS: a suppression opens a comment, focus/skip are calls in code; a stub is found by its message text.
+        const hit = !parts || p.kind === "stub" ? p.re.test(text) : p.kind === "suppression" ? p.re.exec(parts.directive)?.index === 0 : p.re.test(parts.code);
+        if (hit) add(p.kind, file, p.what, [line], { sample: text.trim().slice(0, 90), hides: p.hides ?? HIDES[p.kind] });
+      }
     }
     // configuration loosened
-    for (const [pathRe, lineRe, what] of LOOSEN) {
+    for (const [pathRe, lineRe, what, hides] of LOOSEN) {
       if (!pathRe.test(file)) continue;
-      for (const { line, text } of added) if (lineRe.test(text)) add("loosen", file, what, [line], { sample: text.trim().slice(0, 90) });
+      for (const { line, text } of added) if (lineRe.test(text)) add("loosen", file, what, [line], { sample: text.trim().slice(0, 90), hides: hides ?? HIDES.loosen });
     }
     // test cases removed from a test file
     if (before !== null && (TEST_FILE_RE.test(file) || /\.(test|spec)\./.test(file))) {

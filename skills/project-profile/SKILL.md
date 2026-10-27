@@ -55,8 +55,9 @@ The baseline behind *known* comes from a background run of the project-wide type
 | `still unresolved and no files were changed in the last turn` | You ended a turn without changes after a failure. | If you already explained that the failure is not caused by this task, nothing more is needed; otherwise do not claim completion. |
 | `Auto-fix available: \`<pm> run format\` — it rewrites every file the script covers` | The only mechanical fix is a project-wide script. | Prefer the file-scoped form when one is shown; after a project-wide run, check `git status` and revert files outside your change. |
 | `review of this task's changes:` | The diff review found weakening (suppression, `.skip`/`.only`, stub, loosened config), a secret, an unignored `.env` or a lockfile out of date. | Remove the weakening or explain why it is required; move credentials out of the code; run the lockfile command listed. |
+| `This task made these changes while verification was failing` | The weakening can hide a check that failed in this task (a `@ts-ignore` while the typecheck failed, a `.skip` while tests failed). | Undo it and fix the cause, or keep it and justify it in your final message. |
 | `fast check after this turn: ✗ …` | `verify.perTurn` informational note; no repair loop. | Finish the multi-file change, then make it green. |
-| `<check> disabled this session — <reason>` (shown to the user) | Environment failure: tool missing, dependencies not installed, timeout, service down. | Not your job. If asked, point the user at `/profile doctor` for the fix command. |
+| `<checks> could not run and are disabled for this session — <reason>` | Environment failure: an executable not on `PATH` (for example `pnpm` after a Node version switch), dependencies not installed, timeout, service down. One message per cause. | Not your job, and nothing verified those checks: do not report them as passing. If asked, point the user at `/profile doctor`; after the fix, `/profile refresh` turns the checks back on. |
 
 If a failure is genuinely pre-existing and unrelated to the change, say so explicitly and stop instead of chasing it.
 
@@ -89,6 +90,7 @@ The model cannot invoke slash commands. When configuration must change, give the
 | Tests never run | Tier is `ask` and the prompt was dismissed, or set to `deny` | `/profile tests allow` |
 | Check "unavailable: …" in `/profile` | Binary not on `PATH` / `node_modules/.bin` / venv; dependencies not installed | `/profile doctor` lists the install command; the user runs it, then `/profile refresh` |
 | Profile is stale after adding a tool | Cache keyed on manifests; a new binary is picked up at next run | `/profile refresh` |
+| A `Notes:` entry says scripts.lint runs a package's `lint`, which auto-fixes | A workspace script (`turbo run lint`, `pnpm -r lint`) reaches a package script with `--fix`/`--write` (it would rewrite files) or `--watch` | Nothing to fix: each package is checked with its own read-only checks. To run one command instead: `/profile set lint <read-only command>` |
 | Wrong project root (monorepo member vs workspace) | Start directory | `/profile path` shows the roots; run π from the intended directory |
 | Prompt section too large / instruction file inlined | `profile.maxInstructionFileChars` (3000) and `maxInstructionTotalChars` (6000) | Adjust in `config.json`; large files are listed instead of inlined |
 | Need a trace of gate decisions | — | `PI_PROJECT_PROFILE_DEBUG=1 pi …` writes `$TMPDIR/pi-project-profile/debug.jsonl` |

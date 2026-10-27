@@ -91,14 +91,7 @@ function gitStatus(gitRoot: string, signal?: AbortSignal): Promise<Snapshot | un
         const status = e.slice(0, 2);
         const rel = e.slice(3);
         if (!rel) continue;
-        let stamp = "-";
-        try {
-          const st = statSync(join(gitRoot, rel));
-          stamp = `${Math.floor(st.mtimeMs)}:${st.size}`;
-        } catch {
-          /* deleted */
-        }
-        snap.set(rel, `${status}|${stamp}`);
+        snap.set(rel, `${status}|${stampOf(join(gitRoot, rel))}`);
       }
       resolvePromise(snap);
     });
@@ -112,11 +105,29 @@ export async function snapshotStart(t: ChangeTracker): Promise<void> {
   t.snapshot = t.gitRoot ? await gitStatus(t.gitRoot) : undefined;
 }
 
-/** Paths (absolute) whose git status/stamp differs between two snapshots. */
+/** Content stamp of a path: "mtime:size", "-" when it does not exist. */
+function stampOf(path: string): string {
+  try {
+    const st = statSync(path);
+    return `${Math.floor(st.mtimeMs)}:${st.size}`;
+  } catch {
+    return "-";
+  }
+}
+
+/**
+ * Paths (absolute) whose content changed between two snapshots. Content is the stamp, not the status letters:
+ * staging, unstaging or committing a file changes its status only.
+ */
 function diffSnapshots(gitRoot: string, before: Snapshot, now: Snapshot): string[] {
+  const stamp = (v: string) => v.slice(v.indexOf("|") + 1);
   const out: string[] = [];
-  for (const [rel, v] of now) if (before.get(rel) !== v) out.push(join(gitRoot, rel));
-  for (const rel of before.keys()) if (!now.has(rel)) out.push(join(gitRoot, rel)); // reverted or deleted
+  for (const [rel, v] of now) {
+    const was = before.get(rel);
+    if (was === undefined || stamp(was) !== stamp(v)) out.push(join(gitRoot, rel));
+  }
+  // Clean now: committed (same content) or reverted/deleted (content moved).
+  for (const [rel, was] of before) if (!now.has(rel) && stampOf(join(gitRoot, rel)) !== stamp(was)) out.push(join(gitRoot, rel));
   return out;
 }
 

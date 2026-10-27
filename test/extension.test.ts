@@ -544,6 +544,77 @@ test("a follow-up that continues the agent asks once, at its end, for the comple
   rmSync(root, { recursive: true, force: true });
 });
 
+test("weakening counts as gaming only when it can hide the check that failed: a lint suppression next to a typecheck fix is shown, a @ts-ignore gets a follow-up", async () => {
+  for (const [added, gamed] of [["// eslint-disable-next-line no-console", false], ["// @ts-ignore", true]] as const) {
+    const x = await load();
+    const root = tmp();
+    const typecheck = `node -e "if (require('fs').readFileSync('src/a.ts', 'utf8').includes('BAD')) { console.error('src/a.ts(1,1): error TS2322: Type string is not assignable to type number.'); process.exit(2) }"`;
+    write(root, "package.json", JSON.stringify({ name: "demo", scripts: { typecheck } }));
+    write(root, "package-lock.json", "{}");
+    write(root, "tsconfig.json", "{}");
+    mkdirSync(join(root, "node_modules"), { recursive: true });
+    const ctx = x.ctxFor(root);
+    await x.emit("session_start", {}, ctx);
+    await x.emit("before_agent_start", prompt(), ctx);
+    await editFile(x, ctx, root, "src/a.ts", "export const a: number = 'BAD';\n");
+    assert.deepEqual(kinds(await x.emit("agent_before_settle", settle(), ctx)), ["failure"]);
+    // care-prints: eslint-disables added while the tests failed got "remove them and fix the underlying problem"
+    await editFile(x, ctx, root, "src/a.ts", `${added}\nexport const a: number = 1;\n`);
+    const r = await x.emit("agent_before_settle", settle(), ctx);
+    assert.equal(r?.continue === true, gamed, text(r));
+    assert.equal(text(r).includes("while verification was failing"), gamed, text(r));
+    x.cleanup();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the review skips ignored directories: an edit inside node_modules is no stale lockfile", async () => {
+  const x = await load();
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "demo" }));
+  write(root, "package-lock.json", "{}");
+  write(root, "node_modules/dep/package.json", JSON.stringify({ name: "dep", dependencies: {} }));
+  const ctx = x.ctxFor(root);
+  await x.emit("session_start", {}, ctx);
+  await x.emit("before_agent_start", prompt(), ctx);
+  // ~/projects: patching an installed package got a follow-up turn to run `npm install` at the project root
+  await editFile(x, ctx, root, "node_modules/dep/package.json", JSON.stringify({ name: "dep", dependencies: { extra: "1" } }));
+  const r = await x.emit("agent_before_settle", settle(), ctx);
+  assert.equal(r, undefined, text(r));
+  x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("checks that cannot run for one reason are reported once, with the cause and the directory", async () => {
+  const x = await load();
+  const root = tmp();
+  const emptyBin = tmp();
+  write(root, "package.json", JSON.stringify({ name: "mono", private: true }));
+  write(root, "pnpm-lock.yaml", "");
+  write(root, "apps/web/package.json", JSON.stringify({ name: "web", scripts: { typecheck: "tsc --noEmit", lint: "next lint", "format:check": "prettier --check ." } }));
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const prev = process.env.PATH;
+  // live-and-stay: π ran on a Node without pnpm; three messages each said "dependencies not installed — run `pnpm install`"
+  process.env.PATH = emptyBin;
+  try {
+    const ctx = x.ctxFor(root);
+    await x.emit("session_start", {}, ctx);
+    await x.emit("before_agent_start", prompt(), ctx);
+    await editFile(x, ctx, root, "apps/web/src/a.ts", "export const a = 1;\n");
+    await x.emit("agent_before_settle", settle(), ctx);
+    const env = x.sent.filter((m) => m.details?.kind === "env").map((m) => m.content);
+    assert.equal(env.length, 1, env.join("\n---\n"));
+    assert.match(env[0]!, /typecheck .*lint .*format .*in apps\/web could not run/);
+    assert.ok(env[0]!.includes("`pnpm` not found on PATH") && !env[0]!.includes("dependencies not installed"), env[0]);
+    assert.equal(x.notes.filter(([, m]) => m.includes("disabled this session")).length, 1, x.notes.map(([, m]) => m).join("\n"));
+  } finally {
+    process.env.PATH = prev;
+    x.cleanup();
+    rmSync(root, { recursive: true, force: true });
+    rmSync(emptyBin, { recursive: true, force: true });
+  }
+});
+
 test("per-turn checks are off by default", async () => {
   const x = await load();
   const root = tmp();

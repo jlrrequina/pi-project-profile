@@ -156,7 +156,10 @@ export function executableCandidates(name: string): string[] {
   return hasExt ? [name] : [...exts.map((e) => name + e.toLowerCase()), name];
 }
 
-/** Resolve an executable on PATH without spawning. Paths are checked directly (never cached: `vendor/bin/*` can appear mid-session). */
+/**
+ * Resolve an executable on PATH without spawning. Paths are checked directly. Only hits are cached: a tool that appears
+ * mid-session (`vendor/bin/*` after `composer install`, pnpm after `corepack enable`) is found on the next lookup.
+ */
 export function which(bin: string): string | undefined {
   if (!bin) return undefined;
   if (isAbsolute(bin) || bin.includes(sep) || bin.includes("/")) return executableCandidates(bin).find((c) => isExecutable(c));
@@ -172,7 +175,7 @@ export function which(bin: string): string | undefined {
       }
     }
   }
-  whichCache.set(bin, found);
+  if (found) whichCache.set(bin, found);
   return found;
 }
 

@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { availableParallelism } from "node:os";
 import { join } from "node:path";
-import { sha1 } from "../fs-utils.ts";
+import { sha1, stripJsonComments } from "../fs-utils.ts";
 import { availability } from "../profile/render.ts";
 import type { Check, CheckRun, GateVerdict, ProfileConfig, Tier } from "../types.ts";
 import { checkKey, TIER_POLICY } from "../types.ts";
@@ -70,16 +70,19 @@ export async function runPool<T, R>(items: T[], limit: number, lane: (item: T) =
   return results;
 }
 
+/** Tool configs that their tools read as JSONC (comments, trailing commas). Manifests and data files stay strict JSON. */
+const JSONC_FILE = /(^|\/)\.[^/]+\.json$|(^|\/)\.(vscode|devcontainer)\/|(^|\/)(tsconfig|jsconfig)[^/]*\.json$|\.(jsonc|code-workspace)$|(^|\/)(turbo|biome|deno|nx|tslint|api-extractor|tsdoc|wrangler|devcontainer)\.json$/;
+
 /** In-process checks that need no process (JSON parse). */
 function runInternal(check: Check, files: string[]): CheckRun | undefined {
   if (check.argv[0] !== "__internal_json__") return undefined;
   const started = Date.now();
   const errors: string[] = [];
   for (const f of files) {
-    const base = f.split("/").pop() ?? f;
-    if (/^(tsconfig|jsconfig)[^/]*\.json$|\.jsonc$|\.json5$|^\.vscode\//.test(base) || f.includes(".vscode/") || /\.(code-workspace)$/.test(f)) continue;
+    if (f.endsWith(".json5")) continue; // unquoted keys, single quotes: not JSON at all
     try {
-      JSON.parse(readFileSync(join(check.cwd, f), "utf8"));
+      const text = readFileSync(join(check.cwd, f), "utf8");
+      JSON.parse(JSONC_FILE.test(f) ? stripJsonComments(text) : text);
     } catch (err) {
       errors.push(`${f}: ${(err as Error).message}`);
     }

@@ -97,6 +97,8 @@ const WATCH_RE = /(^|\s)(-w|--watch|--watchAll|watch)(\s|$)/;
 const MUTATING_RE = /(^|\s)(--fix|--write|-w\b|--apply|--apply-unsafe)(\s|$)/;
 /** Script bodies that fan out over every workspace package. */
 const WORKSPACE_WIDE_RE = /(^|\s)(turbo|nx|lerna|rush|moon|wsrun|ultra)(\s|$)|(^|\s)pnpm\s+(-r|--recursive|-w|--filter|-F)\b|(^|\s)(npm|yarn)\s+.*(--workspaces|-ws\b|workspaces foreach)|(^|\s)bun\s+run\s+--filter|(^|\s)tsc\s+(-b|--build)\b/;
+/** Workspace runners that run a same-named script in the packages (`turbo run lint` runs each package's `lint`). */
+const FAN_OUT_RE = /(^|\s)(turbo|nx|lerna|rush|moon|wsrun|ultra)(\s|$)|(^|\s)pnpm\s+(-r|--recursive|--filter|-F)\b|(^|\s)(npm|yarn)\s+.*(--workspaces|-ws\b|workspaces foreach)|(^|\s)bun\s+run\s+--filter/;
 
 interface WorkspaceContext {
   root: string;
@@ -203,11 +205,10 @@ export function detectNode(b: Builder): void {
   else if (has("lerna") || b.hasFile("lerna.json")) monoTool = "Lerna";
   else if (b.hasFile("rush.json")) monoTool = "Rush";
   else if (b.hasFile(".moon/workspace.yml")) monoTool = "moon";
-  let packageCount: number | undefined;
-  if (workspaceGlobs && workspaceGlobs.length > 0) {
-    const dirs = uniq(workspaceGlobs.filter((g) => !g.startsWith("!")).flatMap((g) => expandDirGlob(b.root, g)));
-    packageCount = dirs.filter((d) => b.hasFile(relTo(b.root, join(d, "package.json")))).length;
-  }
+  // Workspace packages (relative dirs): counted for the stack line, read for the scripts a workspace-wide script runs.
+  const manifestOf = (dir: string) => relTo(b.root, join(b.root, dir, "package.json"));
+  const packageDirs = workspaceGlobs?.length ? uniq(workspaceGlobs.filter((g) => !g.startsWith("!")).flatMap((g) => expandDirGlob(b.root, g))).map((d) => relTo(b.root, d)).filter((d) => b.hasFile(manifestOf(d))) : [];
+  const packageCount = workspaceGlobs?.length ? packageDirs.length : undefined;
   if (monoKind || monoTool) {
     b.add(`monorepo: ${monoKind ?? "workspaces"}${packageCount ? ` (${packageCount} packages)` : ""}${monoTool ? ` + ${monoTool}` : ""}`);
     b.monorepo = { kind: monoKind ?? "workspaces", packages: packageCount, tool: monoTool };
@@ -252,20 +253,49 @@ export function detectNode(b: Builder): void {
   const norm = (n: string) => n.toLowerCase().replace(/[-_.]/g, ":");
   const byNorm = new Map<string, string>();
   for (const n of Object.keys(scripts)) if (!byNorm.has(norm(n))) byNorm.set(norm(n), n);
-  const find = (names: string[], contentRe?: RegExp, usable?: (s: string) => boolean): string | undefined => {
+  const find = (names: string[], contentRe?: RegExp, usable?: (body: string, name: string) => boolean): string | undefined => {
     for (const n of names) {
       const real = byNorm.get(norm(n));
       if (real === undefined) continue;
       const body = scripts[real]!;
       if (/no test specified/.test(body)) continue;
       if (contentRe && !contentRe.test(body)) continue;
-      if (usable && !usable(body)) continue;
+      if (usable && !usable(body, real)) continue;
       return real;
     }
     return undefined;
   };
   const readOnly = (body: string) => !MUTATING_RE.test(body) && !WATCH_RE.test(body);
   const notWatch = (body: string) => !WATCH_RE.test(body);
+  const packageScripts = new Map<string, Record<string, string>>();
+  /** The package scripts a workspace-wide script runs: each package's script that its body names (`turbo run lint` → every `lint`). */
+  const fanOut = (body: string): Array<{ pkg: string; name: string; body: string }> => {
+    if (!FAN_OUT_RE.test(body)) return [];
+    const names = new Set(body.split(/[\s=,'"]+/));
+    return packageDirs.flatMap((d) => {
+      if (!packageScripts.has(d)) packageScripts.set(d, b.json<PackageJson>(manifestOf(d))?.scripts ?? {});
+      return Object.entries(packageScripts.get(d)!).filter(([n]) => names.has(n)).map(([name, s]) => ({ pkg: d, name, body: s }));
+    });
+  };
+  const why = (body: string) => (MUTATING_RE.test(body) ? "auto-fixes (--fix/--write)" : "runs in watch mode");
+  /** Why a script cannot run unattended: it, or a package script it fans out to, rewrites files or never exits. */
+  const blocker = (body: string, ok: (body: string) => boolean): string | undefined => {
+    if (!ok(body)) return why(body);
+    const bad = fanOut(body).find((s) => !ok(s.body));
+    return bad ? `runs ${bad.pkg}'s \`${bad.name}\`, which ${why(bad.body)}` : undefined;
+  };
+  const blocked = new Map<string, string>();
+  /** `ok` applied to the script and to every package script it fans out to; records why a script was refused. */
+  const unattended = (ok: (body: string) => boolean) => (body: string, name: string): boolean => {
+    const reason = blocker(body, ok);
+    if (reason) blocked.set(name, reason);
+    return !reason;
+  };
+  const refusedNote = (script: string | undefined, check: string | undefined) => {
+    if (script && !check && blocked.has(script)) b.note(`scripts.${script} ${blocked.get(script)}; not used as a check`);
+  };
+  // CI steps that call one of these scripts are not read-only either (see addCiChecks).
+  for (const [name, body] of Object.entries(scripts)) if (blocker(body, readOnly)) b.unsafeScripts.add(name);
   const pick = (key: string, names: string[], contentRe?: RegExp, usable?: (s: string) => boolean): string | undefined => {
     const n = find(names, contentRe, usable);
     if (n) b.command(key, run(n), `package.json scripts.${n}`);
@@ -311,7 +341,7 @@ export function detectNode(b: Builder): void {
   // typecheck: prefer a usable script; else the raw tool
   // Scripts that fan out over the workspace make package-level runs of the same label redundant.
   const wide = (body: string | undefined) => (body !== undefined && !!workspaceGlobs && WORKSPACE_WIDE_RE.test(body)) || undefined;
-  const tcCheck = find(TYPECHECK_NAMES, undefined, notWatch) ?? find(["check"], /\b(tsc|svelte-check|vue-tsc|astro check|tsgo)\b/, notWatch);
+  const tcCheck = find(TYPECHECK_NAMES, undefined, unattended(notWatch)) ?? find(["check"], /\b(tsc|svelte-check|vue-tsc|astro check|tsgo)\b/, unattended(notWatch));
   if (tcCheck) {
     b.check({ id: "node:typecheck", tier: "fast", label: "typecheck", cmd: run(tcCheck), argv: runArgv(tcCheck), source: `package.json scripts.${tcCheck}`, exts: tsExts, requires, tool: "tsc", coversWorkspace: wide(scripts[tcCheck]) });
   } else if (ts && (b.hasFile("tsconfig.json") || b.hasFile("tsconfig.base.json"))) {
@@ -334,10 +364,10 @@ export function detectNode(b: Builder): void {
       if (!b.commands["typecheck"]) b.command("typecheck", r.cmd, source);
     }
   }
-  if (typecheckScript && !tcCheck) b.note(`scripts.${typecheckScript} runs in watch mode; not used as a check`);
+  refusedNote(typecheckScript, tcCheck);
 
   // lint: usable script, else biome/eslint on changed files
-  const lintCheck = find(LINT_NAMES, undefined, readOnly) ?? (tcCheck !== "check" ? find(["check"], /\b(eslint|biome|oxlint|xo|standard)\b/, readOnly) : undefined);
+  const lintCheck = find(LINT_NAMES, undefined, unattended(readOnly)) ?? (tcCheck !== "check" ? find(["check"], /\b(eslint|biome|oxlint|xo|standard)\b/, unattended(readOnly)) : undefined);
   if (lintCheck) {
     b.check({ id: "node:lint", tier: "lint", label: "lint", cmd: run(lintCheck), argv: runArgv(lintCheck), source: `package.json scripts.${lintCheck}`, exts: tsExts.concat([".css", ".scss", ".md", ".yml", ".yaml"]), requires, tool: /biome/.test(scripts[lintCheck]!) ? "biome" : "eslint", coversWorkspace: wide(scripts[lintCheck]) });
   } else if (biomeConfig || has("@biomejs/biome")) {
@@ -347,10 +377,10 @@ export function detectNode(b: Builder): void {
     const r = bin("eslint", ["--no-warn-ignored", "--max-warnings=1000000"]);
     b.check({ id: "node:lint", tier: "lint", label: "lint", cmd: `${r.cmd} <files>`, argv: r.argv, appendFiles: true, unscopedArgs: ["."], source: eslintConfig ?? "package.json eslintConfig", exts: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".vue", ".svelte"], requires: r.requires, tool: "eslint" });
   }
-  if (lintScript && !lintCheck && MUTATING_RE.test(scripts[lintScript]!)) b.note(`scripts.${lintScript} auto-fixes (--fix/--write); not used as a check`);
+  refusedNote(lintScript, lintCheck);
 
   // format --check as a lint-tier check
-  const fmtCheck = find(FORMAT_CHECK_NAMES, /--check|--list-different|-l\b|--test|--dry-run|check/, readOnly) ?? find(["format", "fmt"], /--check|--list-different/, readOnly);
+  const fmtCheck = find(FORMAT_CHECK_NAMES, /--check|--list-different|-l\b|--test|--dry-run|check/, unattended(readOnly)) ?? find(["format", "fmt"], /--check|--list-different/, unattended(readOnly));
   if (fmtCheck) {
     b.check({ id: "node:format-check", tier: "lint", label: "format", cmd: run(fmtCheck), argv: runArgv(fmtCheck), source: `package.json scripts.${fmtCheck}`, exts: tsExts.concat([".css", ".scss", ".md", ".yml", ".yaml", ".html"]), requires, tool: /biome/.test(scripts[fmtCheck]!) ? "biome" : "prettier", coversWorkspace: wide(scripts[fmtCheck]) });
   } else if (b.conventions.includes("Prettier") && !lintCheck?.includes("prettier")) {
@@ -360,7 +390,7 @@ export function detectNode(b: Builder): void {
 
   // tests
   const runner = has("vitest") ? "vitest" : has("jest") ? "jest" : has("mocha") ? "mocha" : has("ava") ? "ava" : has("tap") ? "tap" : undefined;
-  const testCheck = find(TEST_NAMES, undefined, notWatch);
+  const testCheck = find(TEST_NAMES, undefined, unattended(notWatch));
   // Scoped form (vitest related / jest --findRelatedTests) when the script is a plain runner invocation.
   const scopeOf = (body: string) => scopeFromScript(body, (t) => `${NODE_BIN_PREFIX}${t}`, (t) => bin(t, []).cmd);
   if (testCheck) {
@@ -373,7 +403,7 @@ export function detectNode(b: Builder): void {
     const r = bin("jest", []);
     b.check({ id: "node:test", tier: "test", label: "test", cmd: r.cmd, argv: r.argv, source: "jest", requires: r.requires, tool: "jest", env: { CI: "true" }, scope: scopeOf("jest") });
   }
-  if (testScript && !testCheck) b.note(`scripts.${testScript} runs in watch mode; not used as a check`);
+  refusedNote(testScript, testCheck);
   // One test at a time: faster iteration than the whole suite.
   const pmx = pm === "npm" ? "npx" : pm === "yarn" ? "yarn" : `${pm} exec`;
   const scriptsUse = (re: RegExp) => Object.values(scripts).some((body) => re.test(body));
@@ -388,7 +418,7 @@ export function detectNode(b: Builder): void {
   if (one && (testCheck || runner)) b.command("test:one", one, runner ?? "test script");
 
   // build tier (confirm-once)
-  const buildCheck = find(["build"], undefined, notWatch);
+  const buildCheck = find(["build"], undefined, unattended(notWatch));
   if (buildCheck) {
     b.check({ id: "node:build", tier: "build", label: "build", cmd: run(buildCheck), argv: runArgv(buildCheck), source: `package.json scripts.${buildCheck}`, requires, tool: "generic", coversWorkspace: wide(scripts[buildCheck]) });
   }

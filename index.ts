@@ -74,10 +74,12 @@ interface PromptState {
   findingsContinued: boolean;
   /** Mutation tool calls so far in this prompt (a baseline that finishes after one is discarded). */
   mutations: number;
+  /** Tiers that failed in this prompt: weakening that can hide one of them looks like gaming the check. */
+  failedTiers: Set<Tier>;
 }
 
 function newPrompt(seq: number): PromptState {
-  return { seq, repairRound: 0, pendingRepair: false, finalized: false, mustRun: [], orig: new Map(), files: new Set(), reported: new Set(), findingsContinued: false, mutations: 0 };
+  return { seq, repairRound: 0, pendingRepair: false, finalized: false, mustRun: [], orig: new Map(), files: new Set(), reported: new Set(), findingsContinued: false, mutations: 0, failedTiers: new Set() };
 }
 
 interface SessionState {
@@ -219,17 +221,29 @@ export default function projectProfile(pi: ExtensionAPI) {
     }
   }
 
+  /** Checks that cannot run: told once per check and session, one message per cause (a missing pnpm stops every pnpm check). */
   function reportEnvFailures(ctx: ExtensionContext, verdict: GateVerdict) {
+    const byReason = new Map<string, GateVerdict["runs"]>();
     for (const r of verdict.runs) {
       if (r.status !== "env") continue;
       const key = checkKey(r.check);
       if (s!.notifiedBroken.has(key)) continue;
       s!.notifiedBroken.add(key);
-      const cmd = r.check.cmd.replace(" <files>", "");
-      const log = r.logPath ? ` · log: ${tildify(r.logPath)}` : "";
-      notify(ctx, `verify: ${r.check.label} (\`${cmd}\`) disabled this session — ${r.reason}${log}`, "warning");
+      const reason = r.reason ?? "environment failure";
+      byReason.set(reason, [...(byReason.get(reason) ?? []), r]);
+    }
+    for (const [reason, runs] of byReason) {
+      const one = runs.length === 1;
+      const dirs = uniq(runs.map((r) => whereOf(r.check.cwd)));
+      const where = dirs.length === 1 ? dirs[0]! : "";
+      const names = runs.map((r) => `${r.check.label} (\`${r.check.cmd.replace(" <files>", "")}\`)${where ? "" : whereOf(r.check.cwd)}`);
+      const list = one ? names[0]! : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;
+      const labels = uniq(runs.map((r) => r.check.label)).join(", ");
+      const logs = runs.flatMap((r) => (r.logPath ? [tildify(r.logPath)] : []));
+      const log = logs.length ? ` · log${logs.length > 1 ? "s" : ""}: ${logs.join(", ")}` : "";
+      notify(ctx, `verify: ${list}${where} disabled this session — ${reason}${log}. Fix it, then /profile refresh.`, "warning");
       pi.sendMessage(
-        { customType: VERIFY_MSG, content: `[verification] ${r.check.label} (\`${cmd}\`) could not run and is disabled for this session — ${r.reason}${log}. Nothing verified ${r.check.label} for you: do not assume it passes.`, display: true, details: { seq: -1, kind: "env", headline: `${r.check.label} unavailable: ${r.reason}` } },
+        { customType: VERIFY_MSG, content: `[verification] ${list}${where} could not run and ${one ? "is" : "are"} disabled for this session — ${reason}${log}. Nothing verified ${one ? runs[0]!.check.label : "them"} for you: do not assume ${one ? "it passes" : "they pass"}.`, display: true, details: { seq: -1, kind: "env", headline: `${labels}${where} unavailable: ${reason}` } },
         { triggerTurn: false },
       );
     }
@@ -341,7 +355,9 @@ export default function projectProfile(pi: ExtensionAPI) {
   function freshFindings(): Finding[] {
     const st = s!;
     if (!st.config.verify.guard || st.prompt.files.size === 0) return [];
-    const all = collectFindings({ root: st.root, gitRoot: st.gitRoot, files: Array.from(st.prompt.files).sort(), before: beforeContent, ignored: gitIgnored });
+    // node_modules, build output, …: not the project's code, never committed
+    const files = Array.from(st.prompt.files).filter((f) => !isIgnoredPath(f, st.config.ignoreDirs)).sort();
+    const all = collectFindings({ root: st.root, gitRoot: st.gitRoot, files, before: beforeContent, ignored: gitIgnored });
     const fresh = all.filter((f) => !st.prompt.reported.has(f.key));
     for (const f of fresh) st.prompt.reported.add(f.key);
     return fresh;
@@ -363,20 +379,20 @@ export default function projectProfile(pi: ExtensionAPI) {
     return parts.join(", ");
   }
 
-  /** Report findings: secrets/lockfile/.only always get one follow-up turn; weakening only when it happened while checks were failing. */
-  function findingsDraft(ctx: ExtensionContext, found: Finding[], failing: boolean): { draft: SessionBoundaryDraft; cont: boolean } | undefined {
+  /** Report findings: secrets/lockfile/.only always get one follow-up turn; weakening only when it can hide a check that failed in this prompt. */
+  function findingsDraft(ctx: ExtensionContext, found: Finding[]): { draft: SessionBoundaryDraft; cont: boolean } | undefined {
     const st = s!;
     if (found.length === 0) return undefined;
     const fix = found.some(mustFix);
-    const gamed = failing && found.some(isWeakening);
+    const gamed = found.some((f) => isWeakening(f) && f.hides.some((t) => st.prompt.failedTiers.has(t)));
     const cont = (fix || gamed) && !st.prompt.findingsContinued;
     if (cont) st.prompt.findingsContinued = true;
     const summary = summarizeKinds(found);
     const secrets = found.filter((f) => f.kind === "secret" || f.kind === "env-file");
-    notify(ctx, `verify: this task added ${summary}${secrets.length ? ` — check ${uniq(secrets.map((f) => f.file)).join(", ")} before committing` : ""}`, secrets.length ? "warning" : "info");
+    notify(ctx, `verify: this task's changes include ${summary}${secrets.length ? ` — check ${uniq(secrets.map((f) => f.file)).join(", ")} before committing` : ""}`, secrets.length ? "warning" : "info");
     debug("findings", { seq: st.prompt.seq, cont, found: found.map((f) => ({ kind: f.kind, file: f.file, lines: f.lines })) });
     const lines = ["[verification] review of this task's changes:", ...found.map(formatFinding), ""];
-    if (gamed) lines.push("You added these while verification was failing. Remove them and fix the underlying problem; if one is genuinely needed, keep it and justify it in your final message to the user.");
+    if (gamed) lines.push("This task made these changes while verification was failing. Undo them and fix the underlying problem; if one is genuinely needed, keep it and justify it in your final message to the user.");
     else if (cont) {
       const todo: string[] = [];
       if (found.some((f) => f.kind === "lockfile")) todo.push("run the lockfile command shown");
@@ -753,7 +769,7 @@ export default function projectProfile(pi: ExtensionAPI) {
       }
       const plan = await buildGatePlan(files, { unscoped: unknownChanges && files.length === 0, mustRun: st.prompt.mustRun });
       const total = TIER_ORDER.reduce((n, t) => n + (plan.byTier.get(t)?.length ?? 0), 0);
-      if (total === 0) return boundary(event.entries, [], false, findingsDraft(ctx, found, st.prompt.repairRound > 0));
+      if (total === 0) return boundary(event.entries, [], false, findingsDraft(ctx, found));
       await stopBaselines();
       const hooks = makeHooks(ctx, st.abort.signal, { interactive: true });
       setStatus(ctx, "⏳ verifying…");
@@ -772,20 +788,20 @@ export default function projectProfile(pi: ExtensionAPI) {
         }
         const known = knownNote(ctx, verdict);
         if (known) drafts.push(known);
-        const failedEarlier = st.prompt.repairRound > 0;
         st.prompt.pendingRepair = false;
         st.prompt.mustRun = [];
         // Boundary results replace the draft chain: always carry earlier handlers' entries.
-        return boundary(event.entries, drafts, false, findingsDraft(ctx, found, failedEarlier));
+        return boundary(event.entries, drafts, false, findingsDraft(ctx, found));
       }
       if (verdict.status === "red") {
+        for (const r of verdict.runs) if (r.status === "fail") st.prompt.failedTiers.add(r.check.tier);
         const failingPlanned: PlannedCheck[] = [];
         for (const t of TIER_ORDER) for (const p of plan.byTier.get(t) ?? []) if (verdict.runs.some((r) => r.status === "fail" && r.check.id === p.check.id && r.check.cwd === p.check.cwd)) failingPlanned.push(p);
         const failingLabels = uniq(verdict.runs.filter((r) => r.status === "fail").map((r) => r.check.label)).join(", ");
         setStatus(ctx, `✗ ${failingLabels}`);
         if (st.prompt.finalized) {
           notify(ctx, `verify: still failing (${failingLabels}); automatic repair already stopped for this prompt`, "warning");
-          return boundary(event.entries, [], false, findingsDraft(ctx, found, true));
+          return boundary(event.entries, [], false, findingsDraft(ctx, found));
         }
         const drafts = supersedeDrafts(ctx);
         const round = st.prompt.repairRound + 1;
@@ -800,7 +816,7 @@ export default function projectProfile(pi: ExtensionAPI) {
           notify(ctx, `verify: ${stopReason} — ${failingLabels} still failing; see the transcript`, "warning");
           const summarize = st.config.verify.summarizeOnGiveUp;
           drafts.push({ type: "custom_message", customType: VERIFY_MSG, content: giveUpMessage(verdict, stopReason, summarize), display: true, details: { seq: st.prompt.seq, kind: "giveup", headline: `stopped — ${stopReason} (${failingLabels})` } });
-          return boundary(event.entries, drafts, summarize, findingsDraft(ctx, found, true));
+          return boundary(event.entries, drafts, summarize, findingsDraft(ctx, found));
         }
         st.prompt.repairRound = round;
         st.prompt.lastSignature = verdict.signature;
@@ -809,11 +825,11 @@ export default function projectProfile(pi: ExtensionAPI) {
         debug("repair", { seq: st.prompt.seq, round, failing: failingLabels });
         notify(ctx, `verify: ${failingLabels} failed — sending the agent back (round ${round}/${max})`, "info");
         drafts.push({ type: "custom_message", customType: VERIFY_MSG, content: failureMessage(verdict, round, max), display: true, details: { seq: st.prompt.seq, kind: "failure", headline: `${failingLabels} failed — round ${round}/${max}` } });
-        return boundary(event.entries, drafts, true, findingsDraft(ctx, found, true));
+        return boundary(event.entries, drafts, true, findingsDraft(ctx, found));
       }
       // env / skipped
       setStatus(ctx, verdict.status === "env" ? "⚠ checks unavailable" : "– nothing to verify");
-      return boundary(event.entries, [], false, findingsDraft(ctx, found, st.prompt.repairRound > 0));
+      return boundary(event.entries, [], false, findingsDraft(ctx, found));
     } catch (err) {
       notify(ctx, `verify: internal error — ${(err as Error).message}`, "error");
       return;

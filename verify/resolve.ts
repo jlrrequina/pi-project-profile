@@ -6,7 +6,7 @@
  *   node_modules/.bin:<tool>      nearest node_modules/.bin/<tool> walking up from cwd
  *   python:<manager>:<tool>       manager runner (uv/poetry/pdm/pipenv/hatch) → venv bin → PATH
  */
-import { join } from "node:path";
+import { isAbsolute, join, resolve } from "node:path";
 import { executableCandidates, findNodeBin, isExecutable, isWindows, which } from "../fs-utils.ts";
 import type { Check } from "../types.ts";
 import { NODE_BIN_PREFIX, PY_PREFIX } from "../types.ts";
@@ -32,9 +32,23 @@ export function resolveArgv(check: Check, extraFiles: string[] = []): Resolved {
     return { argv: [...r, ...rest, ...extraFiles] };
   }
   // plain executable: verify presence. On Windows spawn needs the resolved `.cmd`/`.exe` path (PATHEXT is not applied without a shell).
-  const found = which(head);
-  if (!found) return { argv: [], missing: check.requires?.hint ?? `${head} not found` };
+  // A relative path (./gradlew, vendor/bin/phpstan) belongs to the check: spawn runs it from the check's cwd.
+  const pathLike = isAbsolute(head) || /[\\/]/.test(head);
+  const found = which(pathLike ? resolve(check.cwd, head) : head);
+  if (!found) return { argv: [], missing: pathLike ? (check.requires?.hint ?? `${head} missing`) : notOnPath(head, check.requires?.hint) };
   return { argv: [isWindows() ? found : head, ...rest, ...extraFiles] };
+}
+
+/** Package managers that switching Node versions drops from PATH, and how to get them back. */
+const INSTALL: Record<string, string> = {
+  pnpm: "install it with `npm install -g pnpm` or `corepack enable pnpm`",
+  yarn: "install it with `npm install -g yarn` or `corepack enable yarn`",
+};
+
+/** The missing executable is the cause. A hint about another requirement (dependencies, a component) points the wrong way. */
+function notOnPath(head: string, hint: string | undefined): string {
+  if (hint?.startsWith(`${head} `)) return hint;
+  return `\`${head}\` not found on PATH${INSTALL[head] ? `; ${INSTALL[head]}` : ""}`;
 }
 
 const RUNNERS: Record<string, string[]> = {

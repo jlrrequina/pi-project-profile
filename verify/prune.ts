@@ -19,6 +19,7 @@ const DIAG_PATTERNS: RegExp[] = [
   /^\s*(---\s+FAIL:|panic:|fatal error:)/, // go test
   /^\s*E\s{2,}/, // pytest assertion detail
   /^\s*(AssertionError|TypeError|ReferenceError|SyntaxError|RangeError|Error:|\w+Error:|Exception:|\w+Exception:)/,
+  /^\s*([\w$.]+ \[\w*(Error|Exception)\]|\[\w*(Error|Exception)): /, // Node's inspect: `eN [Error]: Missing credentials`, `[Error: Failed to collect page data]`
   /^\s*Traceback \(most recent call last\)/,
   /^\s*File "[^"]+", line \d+/,
   /^\s*at .+\(.+:\d+:\d+\)$/, // js stack (kept but de-prioritised via limit)
@@ -133,12 +134,12 @@ export function pruneOutput(text: string, maxLines = 40, opts: { drop?: Set<numb
         else break;
       }
     }
-    // Stack traces: cap "at ..." lines to 3 per block
+    // Stack traces: cap "at ..." lines to 3 per block (`at fn (file:1:2)` and bare `at file:1:2` alike)
     let atRun = 0;
     const ordered = Array.from(keep).sort((a, b) => a - b);
     for (const i of ordered) {
       const l = all[i]!;
-      if (/^\s*at .+\(.+:\d+:\d+\)$/.test(l)) {
+      if (/^\s*at\s/.test(l)) {
         atRun++;
         if (atRun > 3) continue;
       } else atRun = 0;

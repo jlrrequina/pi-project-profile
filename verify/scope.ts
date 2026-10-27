@@ -15,6 +15,7 @@
  *
  * Every rule fails to the full run: a config or manifest change, a file kind
  * the runner cannot trace, or an ambiguous package mapping returns undefined.
+ * (A deleted file never gets here: the planner hands the full run those.)
  */
 import { basename, dirname, join } from "node:path";
 import { tomlHasTable, tomlSections } from "../detect/context.ts";
