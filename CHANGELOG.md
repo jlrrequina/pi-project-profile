@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.4.0 — 2026-10-27
+
 From a review of every gate message in the author's sessions since 1.2.0: 14 of 32 repair rounds and 6 of 13 review reports came from the defects below, not from the agent's work.
 
 - **A workspace script is an automatic check only when every package script it runs is read-only.** At the root of a pnpm workspace, `turbo run lint` ran `apps/backend`'s `eslint … --fix`: the gate rewrote 33 files in one session, the agent restored them, and the restored files then failed the backend's lint. 12 of the 32 repair rounds came from this. A workspace-wide script (turbo, nx, lerna, `pnpm -r`, `npm --workspaces`, …) that reaches a package script with `--fix`/`--write` or `--watch` is no check now, and neither is a CI step that calls it. Each package is checked with its own read-only checks, and the profile notes why. `DETECTOR_VERSION` 15.
