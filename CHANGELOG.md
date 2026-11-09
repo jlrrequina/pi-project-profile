@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.5.0 — 2026-11-09
+
 Memory, after [Anthropic's components of agent memory](https://www.anthropic.com/research/components-of-agent-memory): a small injected layer of notes that carry how they were verified, a channel for the agent to write them, and a sleep phase that checks memory against ground truth. Nothing here calls a model on its own, and nothing is written into the repository.
 
 - **Notes carry author, date, evidence and an id.** `user.notes` was a list of strings; a note is now `{ id, text, by: "user" | "agent", at, evidence }`. Stored profiles from earlier versions load unchanged (string notes become user notes with a stable id). The prompt shows `(user 3f9a1c) …` and `(agent 8b02e4) … — evidence: …` within `profile.maxNotesChars` (1200) and references the rest by path; before, notes beyond the twelfth were dropped without a word. `/profile notes` lists ids, dates and stale flags; `/profile notes rm <id|n>` removes one (only `clear` existed); `/profile set <key> default` removes an override (only `-`, which disables, existed).
