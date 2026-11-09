@@ -1,8 +1,9 @@
-import { mkdirSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DETECTOR_VERSION, detectProject } from "../detect/index.ts";
 import { fileStamp, sha1 } from "../fs-utils.ts";
 import type { DetectedProfile, ProfileConfig, StoredProfile, UserData } from "../types.ts";
+import { migrateNotes } from "./memory.ts";
 
 export function profilesDir(agentDir: string): string {
   return join(agentDir, "project-profile", "profiles");
@@ -22,6 +23,7 @@ export function loadStored(agentDir: string, root: string): StoredProfile | unde
     const parsed = JSON.parse(raw) as StoredProfile;
     if (!parsed || typeof parsed !== "object" || !parsed.detected) return undefined;
     parsed.user = { ...emptyUserData(), ...(parsed.user ?? {}) };
+    parsed.user.notes = migrateNotes(parsed.user.notes);
     return parsed;
   } catch {
     return undefined;
@@ -34,15 +36,6 @@ export function saveStored(agentDir: string, stored: StoredProfile): void {
   const tmp = `${p}.${process.pid}.tmp`;
   writeFileSync(tmp, JSON.stringify(stored, null, 2));
   renameSync(tmp, p);
-}
-
-export function deleteStored(agentDir: string, root: string): boolean {
-  try {
-    unlinkSync(profilePath(agentDir, root));
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /** True when any fingerprinted file changed (mtime/size) since detection. */
@@ -61,7 +54,16 @@ export function isStale(detected: DetectedProfile, root: string): boolean {
  */
 export function loadOrDetect(agentDir: string, root: string, config: ProfileConfig, gitRoot: string | undefined, force = false): { stored: StoredProfile; refreshed: boolean } {
   const existing = loadStored(agentDir, root);
-  if (existing && !force && !isStale(existing.detected, root)) return { stored: existing, refreshed: false };
+  if (existing && !force && !isStale(existing.detected, root)) {
+    // A visit counts as use: pruning drops profiles (and their notes) not visited for a long time, not profiles that merely never changed.
+    try {
+      const now = new Date();
+      utimesSync(profilePath(agentDir, root), now, now);
+    } catch {
+      /* read-only cache dir */
+    }
+    return { stored: existing, refreshed: false };
+  }
   const detected = detectProject(root, config, gitRoot);
   const stored: StoredProfile = { detected, user: existing?.user ?? emptyUserData(), updatedAt: new Date().toISOString() };
   try {
@@ -76,22 +78,4 @@ export function updateUser(agentDir: string, stored: StoredProfile, mutate: (u: 
   mutate(stored.user);
   stored.updatedAt = new Date().toISOString();
   saveStored(agentDir, stored);
-}
-
-/** Remove cached profiles for roots that no longer exist (best effort, cheap). */
-export function pruneProfiles(agentDir: string, maxAgeDays = 120): void {
-  try {
-    const dir = profilesDir(agentDir);
-    const cutoff = Date.now() - maxAgeDays * 86_400_000;
-    for (const f of readdirSync(dir)) {
-      const p = join(dir, f);
-      try {
-        if (statSync(p).mtimeMs < cutoff) unlinkSync(p);
-      } catch {
-        /* ignore */
-      }
-    }
-  } catch {
-    /* ignore */
-  }
 }

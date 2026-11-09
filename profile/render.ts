@@ -4,6 +4,17 @@ import { tildify } from "../fs-utils.ts";
 import { resolveArgv } from "../verify/resolve.ts";
 import type { Check, ProfileConfig, StoredProfile, Tier } from "../types.ts";
 import { checkKey, TIER_POLICY } from "../types.ts";
+import { listNotes, renderNotes } from "./memory.ts";
+
+/** Session-stable inputs of the prompt section that are not part of the stored profile. */
+export interface RenderOptions {
+  verifyEnabled: boolean;
+  piLoadedContextFiles: string[];
+  /** Note id → why the sleep pass thinks it may be stale (computed once per session). */
+  stale?: Map<string, string>;
+  /** Where the notes that do not fit the budget can be read. */
+  notesPath?: string;
+}
 
 /** Commands after applying user overrides (null = disabled). */
 export function effectiveCommands(stored: StoredProfile): Record<string, { cmd: string; source: string }> {
@@ -50,10 +61,11 @@ function joinTokens(tokens: string[], max = 14): string {
  * The static system-prompt section. No branch names, timestamps, or other
  * volatile data: it must render identically for every turn of a session.
  */
-export function renderPromptSection(stored: StoredProfile, config: ProfileConfig, opts: { verifyEnabled: boolean; piLoadedContextFiles: string[] }): string {
+export function renderPromptSection(stored: StoredProfile, config: ProfileConfig, opts: RenderOptions): string {
   const d = stored.detected;
   const lines: string[] = [];
-  lines.push("Auto-detected by the project-profile extension from manifests, configs and CI. Treat as a strong hint, not ground truth; the repo wins on conflict. `/profile` inspects it, `/profile set <key> <cmd>` and `/profile note <text>` correct it.");
+  const memory = config.profile.agentNotes ? " The `remember` tool saves a note for future sessions: a fact about this project that its files do not show and that cost effort to learn; `forget_note` removes one that proved wrong." : "";
+  lines.push(`Auto-detected by the project-profile extension from manifests, configs and CI. Treat as a strong hint, not ground truth; the repo wins on conflict. \`/profile\` inspects it, \`/profile set <key> <cmd>\` and \`/profile note <text>\` correct it.${memory}`);
   const head: string[] = [];
   head.push(`${d.name ?? "project"} — ${tildify(d.root)}${d.gitRoot && d.gitRoot !== d.root ? ` (git root ${tildify(d.gitRoot)})` : ""}`);
   if (d.remote) head.push(`remote ${d.remote}`);
@@ -103,8 +115,8 @@ export function renderPromptSection(stored: StoredProfile, config: ProfileConfig
     }
     lines.push(`- Instruction files: ${parts.join(" · ")}`);
   }
-  const notes = [...d.notes, ...stored.user.notes.map((n) => `(user) ${n}`)];
-  if (notes.length) lines.push(`- Notes: ${notes.slice(0, 12).join(" · ")}`);
+  const notes = [...d.notes, ...renderNotes(stored.user.notes, opts.stale ?? new Map(), config.profile.maxNotesChars, opts.notesPath)];
+  if (notes.length) lines.push(`- Notes: ${notes.join(" · ")}`);
   // verification summary
   const checks = effectiveChecks(stored);
   const auto = checks.filter((c) => c.tier === "fast" || c.tier === "lint");
@@ -176,12 +188,12 @@ export function formatBytes(n: number): string {
 }
 
 /** Human-facing report for `/profile` (markdown). */
-export function renderReport(stored: StoredProfile, config: ProfileConfig, opts: { verifyEnabled: boolean; cachePath: string; brokenChecks: Map<string, string>; lastVerdict?: string }): string {
+export function renderReport(stored: StoredProfile, config: ProfileConfig, opts: { verifyEnabled: boolean; cachePath: string; brokenChecks: Map<string, string>; lastVerdict?: string; stale?: Map<string, string> }): string {
   const d = stored.detected;
   const out: string[] = [];
   out.push(`# Project profile: ${d.name ?? d.root}`);
   out.push("");
-  out.push(renderPromptSection(stored, config, { verifyEnabled: opts.verifyEnabled, piLoadedContextFiles: [] }).split("\n\n")[0]!);
+  out.push(renderPromptSection(stored, config, { verifyEnabled: opts.verifyEnabled, piLoadedContextFiles: [], stale: opts.stale, notesPath: tildify(opts.cachePath) }).split("\n\n")[0]!);
   out.push("");
   out.push("## Checks");
   const checks = effectiveChecks(stored);
@@ -195,12 +207,13 @@ export function renderReport(stored: StoredProfile, config: ProfileConfig, opts:
   out.push("");
   out.push("## User data");
   out.push(`- overrides: ${Object.keys(stored.user.overrides).length ? Object.entries(stored.user.overrides).map(([k, v]) => `${k}=${v === null ? "(disabled)" : `\`${v}\``}`).join(", ") : "none"}`);
-  out.push(`- notes: ${stored.user.notes.length ? stored.user.notes.map((n) => `"${n}"`).join(", ") : "none"}`);
+  out.push(`- notes: ${stored.user.notes.length ? `${stored.user.notes.length} (\`/profile notes\` lists them)` : "none"}`);
+  for (const line of listNotes(stored.user.notes, opts.stale ?? new Map())) out.push(`  ${line.replace(/\n   /g, "\n    ")}`);
   out.push(`- permissions: tests=${stored.user.permissions.tests ?? `(global: ${config.verify.runTests})`}, build=${stored.user.permissions.build ?? `(global: ${config.verify.runBuild})`}`);
   out.push(`- verify: ${opts.verifyEnabled ? "on" : "off"}${stored.user.verify !== undefined ? ` (per-repo override: ${stored.user.verify})` : ""}${opts.lastVerdict ? ` · last: ${opts.lastVerdict}` : ""}`);
   out.push(`- cache: ${tildify(opts.cachePath)} (detector v${d.version}, updated ${stored.updatedAt})`);
   out.push("");
-  out.push("Commands: `/profile refresh` · `/profile set <key> <cmd|->` · `/profile note <text>` · `/profile notes clear` · `/profile tests allow|deny|ask` · `/profile build allow|deny|ask` · `/profile verify on|off` · `/profile forget` · `/verify [tier]`");
+  out.push("Commands: `/profile refresh` · `/profile set <key> <cmd|-|default>` · `/profile note <text>` · `/profile notes [rm <id>|clear]` · `/profile tests allow|deny|ask` · `/profile build allow|deny|ask` · `/profile verify on|off` · `/profile history` · `/profile dream` · `/profile storage` · `/profile forget` · `/verify [tier]`");
   return out.join("\n");
 }
 

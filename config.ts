@@ -55,7 +55,7 @@ export function writeDefaultConfig(dir = agentDir()): string {
   const p = configPath(dir);
   mkdirSync(join(dir, "project-profile"), { recursive: true });
   const body = `// project-profile configuration. Unknown keys are reported at session start.
-// Per-repo data (command overrides, notes, test permission) lives in ./profiles/*.json — use /profile to edit.
+// Per-repo data (command overrides, notes, test permission) lives in ./profiles/*.json, the gate history in ./history/, baselines in ./baselines/ — /profile edits, /profile storage lists and prunes.
 ${JSON.stringify(DEFAULT_CONFIG, null, 2)}
 `;
   writeFileSync(p, body);

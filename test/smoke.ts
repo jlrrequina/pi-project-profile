@@ -53,7 +53,7 @@ mod.default({
   appendEntry: () => {},
   sendMessage: () => {},
 });
-if (tools.join() !== "run_checks") fail(`expected exactly one tool run_checks, got ${JSON.stringify(tools)}`);
+if (tools.join() !== "run_checks,remember,forget_note") fail(`expected the tools run_checks, remember, forget_note, got ${JSON.stringify(tools)}`);
 for (const c of ["profile", "verify"]) if (!commands.includes(c)) fail(`command /${c} not registered`);
 for (const e of ["session_start", "before_agent_start", "tool_call", "tool_result", "agent_before_settle", "turn_end"]) if (!events.has(e)) fail(`no ${e} handler`);
 

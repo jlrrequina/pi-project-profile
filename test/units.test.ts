@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import { test } from "node:test";
@@ -8,7 +8,11 @@ import { composeServices, parseToolVersions, tomlHasTable, tomlKeys, tomlSection
 import { detectProject, findProjectRoot, nearestProjectDir } from "../detect/index.ts";
 import { clearWhichCache, executableCandidates, expandDirGlob, findNodeBin, stripJsonComments } from "../fs-utils.ts";
 import { effectiveChecks, renderPromptSection, renderReport, tierAllowed } from "../profile/render.ts";
-import { emptyUserData, isStale, loadOrDetect, updateUser } from "../profile/store.ts";
+import { emptyUserData, isStale, loadOrDetect, loadStored, profilePath, saveStored, updateUser } from "../profile/store.ts";
+import { duplicateOf, findNote, listNotes, makeNote, migrateNotes, pathTokens, redundantOverrides, renderNotes, validateNotes } from "../profile/memory.ts";
+import { appendHistory, HISTORY_MAX_BYTES, historyForDream, historyPath, readHistory, renderHistory, summarizeHistory, type HistoryEvent } from "../profile/history.ts";
+import { BASELINE_MAX_AGE_MS, baselinePath, gitHead, loadBaseline, saveBaseline, treeFingerprint } from "../verify/baseline-cache.ts";
+import { forgetRepo, formatSize, PROFILE_MAX_AGE_MS, pruneStorage, renderStorage, storageReport } from "../profile/storage.ts";
 import { checkKey, DEFAULT_CONFIG, type Check, type StoredProfile } from "../types.ts";
 import { classifyFailure } from "../verify/classify.ts";
 import { buildPlan, isDocOnly, TIER_ORDER, type Plan, type PlannedCheck } from "../verify/plan.ts";
@@ -242,13 +246,13 @@ test("cache round-trip, staleness, user data survives re-detect", () => {
   const a = loadOrDetect(agent, root, config, undefined);
   assert.ok(a.refreshed);
   updateUser(agent, a.stored, (u) => {
-    u.notes.push("hello");
+    u.notes.push(makeNote(u.notes, "user", "hello", undefined, "2026-01-02"));
     u.permissions.tests = "allow";
     u.overrides["lint"] = "make lint";
   });
   const b = loadOrDetect(agent, root, config, undefined);
   assert.ok(!b.refreshed);
-  assert.deepEqual(b.stored.user.notes, ["hello"]);
+  assert.deepEqual(b.stored.user.notes.map((n) => [n.text, n.by, n.at]), [["hello", "user", "2026-01-02"]]);
   // touch manifest → stale → refreshed but user data kept
   const later = new Date(Date.now() + 5000);
   writeFileSync(join(root, "package.json"), JSON.stringify({ name: "x", scripts: { test: "vitest run", lint: "eslint" } }));
@@ -256,7 +260,7 @@ test("cache round-trip, staleness, user data survives re-detect", () => {
   assert.ok(isStale(b.stored.detected, root));
   const c = loadOrDetect(agent, root, config, undefined);
   assert.ok(c.refreshed);
-  assert.deepEqual(c.stored.user.notes, ["hello"]);
+  assert.deepEqual(c.stored.user.notes.map((n) => n.text), ["hello"]);
   assert.equal(c.stored.user.permissions.tests, "allow");
   const checks = effectiveChecks(c.stored);
   assert.ok(checks.some((ch) => ch.id === "user:lint" && ch.cmd === "make lint"));
@@ -270,6 +274,266 @@ function require_utimes(p: string, d: Date) {
   const fs = process.getBuiltinModule("node:fs") as typeof import("node:fs");
   fs.utimesSync(p, d, d);
 }
+
+// ---------------------------------------------------------------- history
+test("history: events append as JSON lines, survive torn lines, and the file stays bounded", () => {
+  const agent = tmp();
+  const root = "/some/project";
+  appendHistory(agent, root, "s1", { kind: "verdict", seq: 1, status: "red", round: 0, failed: ["lint"], known: 0, ms: 10, hints: ["prettier --write"] }, new Date("2026-11-01T10:00:00Z"));
+  appendHistory(agent, root, "s1", { kind: "note", action: "add", by: "agent", id: "abc123", text: "x" });
+  writeFileSync(historyPath(agent, root), '{"kind": "verdict", "t"\n', { flag: "a" });
+  const events = readHistory(agent, root);
+  assert.deepEqual(events.map((e) => [e.kind, e.s, e.t.startsWith("2026-11-01")]), [["verdict", "s1", true], ["note", "s1", false]]);
+  assert.deepEqual(readHistory(agent, "/never/seen"), []);
+  // a large file is rewritten with its newest lines only
+  const big = "x".repeat(600);
+  for (let i = 0; i < 500; i++) appendHistory(agent, root, "s2", { kind: "env", seq: i, reason: big, checks: ["lint"] });
+  const size = statSync(historyPath(agent, root)).size;
+  assert.ok(size <= HISTORY_MAX_BYTES, `bounded: ${size} bytes`);
+  const after = readHistory(agent, root);
+  assert.ok(after.length >= 100 && after.length < 500 && after.at(-1)!.kind === "env" && (after.at(-1) as { seq: number }).seq === 499, `newest kept (${after.length} events)`);
+  rmSync(agent, { recursive: true, force: true });
+});
+
+test("history: the summary groups verdicts into tasks per session, counts first-attempt failures and names patterns", () => {
+  const t = (day: number, h = 10) => `2026-11-${String(day).padStart(2, "0")}T${String(h).padStart(2, "0")}:00:00Z`;
+  const ev: HistoryEvent[] = [
+    // session a, task 1: lint fails, fixed in one round
+    { t: t(1), s: "a", kind: "verdict", seq: 1, status: "red", round: 0, failed: ["lint"], known: 0, ms: 1, hints: ["prettier --write"] },
+    { t: t(1, 11), s: "a", kind: "verdict", seq: 1, status: "green", round: 1, failed: [], known: 0, ms: 1 },
+    // session a, task 2: green first time
+    { t: t(2), s: "a", kind: "verdict", seq: 2, status: "green", round: 0, failed: [], known: 3, ms: 1 },
+    // session b, task 1 (same seq as a:1, a different task): lint and typecheck fail, repair gives up
+    { t: t(3), s: "b", kind: "verdict", seq: 1, status: "red", round: 0, failed: ["lint", "typecheck"], known: 0, ms: 1, hints: ["prettier --write"] },
+    { t: t(3, 11), s: "b", kind: "verdict", seq: 1, status: "red", round: 1, failed: ["typecheck"], known: 0, ms: 1 },
+    { t: t(3, 12), s: "b", kind: "giveup", seq: 1, reason: "the same failure repeated with no progress", failed: ["typecheck"] },
+    // session c: lint again, plus env + findings + baseline + notes
+    { t: t(4), s: "c", kind: "verdict", seq: 1, status: "red", round: 0, failed: ["lint"], known: 0, ms: 1, hints: ["prettier --write"] },
+    { t: t(4, 11), s: "c", kind: "verdict", seq: 1, status: "green", round: 1, failed: [], known: 0, ms: 1 },
+    { t: t(4), s: "c", kind: "env", seq: 2, reason: "`pnpm` not found on PATH", checks: ["typecheck"] },
+    { t: t(5), s: "d", kind: "env", seq: 1, reason: "`pnpm` not found on PATH", checks: ["typecheck"] },
+    { t: t(5), s: "d", kind: "findings", seq: 1, kinds: ["suppression", "skip"], cont: false },
+    { t: t(5), s: "d", kind: "baseline", dir: ".", failed: [{ label: "typecheck", count: 552 }] },
+    { t: t(5), s: "d", kind: "note", action: "add", by: "agent", id: "n1", text: "x" },
+    { t: t(5), s: "d", kind: "note", action: "add", by: "user", id: "n2", text: "y" },
+    { t: t(5), s: "d", kind: "note", action: "remove", by: "user", id: "n1", text: "x" },
+    { t: t(5), s: "d", kind: "dream" },
+    // too old: outside the window
+    { t: "2026-01-01T00:00:00Z", s: "z", kind: "verdict", seq: 1, status: "red", round: 0, failed: ["test"], known: 0, ms: 1 },
+  ];
+  const sum = summarizeHistory(ev, { now: Date.parse(t(6)) });
+  assert.equal(sum.tasks.length, 4);
+  assert.deepEqual(sum.tasks.map((x) => [x.key, x.firstFailed, x.rounds, x.final, x.gaveUp ?? null]), [
+    ["a:1", ["lint"], 1, "green", null],
+    ["a:2", [], 0, "green", null],
+    ["b:1", ["lint", "typecheck"], 1, "red", "the same failure repeated with no progress"],
+    ["c:1", ["lint"], 1, "green", null],
+  ]);
+  assert.deepEqual(Array.from(sum.firstFailures.entries()), [["lint", 3], ["typecheck", 1]]);
+  assert.deepEqual(Array.from(sum.hintsByLabel.get("lint")!.entries()), [["prettier --write", 3]]);
+  assert.deepEqual(Array.from(sum.env.get("`pnpm` not found on PATH")!), ["c", "d"]);
+  assert.deepEqual(Array.from(sum.findings.entries()), [["suppression", 1], ["skip", 1]]);
+  assert.deepEqual(sum.baseline.get("typecheck"), { count: 552, date: "2026-11-05" });
+  assert.deepEqual(sum.notes, { added: 2, addedByAgent: 1, removed: 1 });
+  assert.equal(sum.dreams, 1);
+  assert.equal(sum.patterns.length, 2, sum.patterns.join("\n"));
+  assert.ok(sum.patterns[0]!.startsWith("lint failed on the first attempt in 3 of 4 tasks (auto-fix shown: `prettier --write`)"), sum.patterns[0]);
+  assert.ok(sum.patterns[1]!.includes("disabled checks in 2 sessions"), sum.patterns[1]);
+  const md = renderHistory("demo", sum, { path: "/x/h.jsonl", bytes: 2048, events: ev.length });
+  for (const part of ["# Verification history: demo (last 30 days)", "- 4 tasks verified · 1 green on the first attempt · 3 repaired (avg 1.0 round) · 1 stopped unresolved", "lint 3 (auto-fix shown 3×: `prettier --write`)", "typecheck 552 diagnostics (last seen 2026-11-05)", "check suppression 1 · skipped test 1", "2 added (1 by the agent) · 1 removed · 1 dream", "## Patterns", "- 2026-11-03: ✗ lint, typecheck → stopped: the same failure repeated", "- 2026-11-01: ✗ lint → fixed in 1 round", "(2 KB, 17 events)"]) assert.ok(md.includes(part), `report has ${JSON.stringify(part)}:\n${md}`);
+  const dream = historyForDream(sum);
+  assert.ok(dream[0]!.startsWith("4 tasks verified in the last 30 days; first-attempt failures: lint ×3, typecheck ×1"), dream[0]);
+  assert.ok(dream.some((l) => l.startsWith("already failing on the untouched tree")) && dream.some((l) => l.startsWith("recent failed tasks:")), dream.join("\n"));
+  const empty = renderHistory("demo", summarizeHistory([]), { path: "/x/h.jsonl", bytes: 0, events: 0 });
+  assert.ok(empty.includes("Nothing recorded yet"));
+});
+
+// ---------------------------------------------------------------- baseline cache
+test("baseline cache: round-trips the diagnostics of a tree state, refuses another state, an old entry, a corrupt file; install markers are part of the state", async () => {
+  const agent = tmp();
+  const root = tmp();
+  const base = { head: "a".repeat(40), snapshot: new Map([["src/x.ts", " M|100:5"]]), manifests: { "package.json": "1:2" }, dirs: [root] };
+  const fp = treeFingerprint(base)!;
+  const diags = new Map([
+    [`node:typecheck@${root}`, { label: "typecheck", cwd: root, diag: new Map([["src/old.ts(N,N): error TS2322: Type string is not assignable to type number.", 1]]) }],
+    [`node:lint@${root}`, { label: "lint", cwd: root, diag: new Map<string, number>() }],
+    [`node:big@${root}`, { label: "big", cwd: root, diag: new Map(Array.from({ length: 5001 }, (_, i) => [`k${i}`, 1] as [string, number])) }],
+  ]);
+  assert.ok(saveBaseline(agent, root, fp, diags, new Date("2026-11-09T10:00:00Z")));
+  const now = Date.parse("2026-11-09T12:00:00Z");
+  const loaded = loadBaseline(agent, root, (d) => treeFingerprint({ ...base, dirs: d }), now)!;
+  assert.ok(loaded, "same tree → restored");
+  assert.equal(loaded.at, "2026-11-09T10:00:00.000Z");
+  assert.deepEqual(Array.from(loaded.checks.keys()).sort(), [`node:lint@${root}`, `node:typecheck@${root}`], "the oversized check is not cached");
+  assert.deepEqual(Array.from(loaded.checks.get(`node:typecheck@${root}`)!.diag.entries()), [["src/old.ts(N,N): error TS2322: Type string is not assignable to type number.", 1]]);
+  assert.equal(loadBaseline(agent, root, () => treeFingerprint({ ...base, head: "b".repeat(40) }), now), undefined, "another commit → no baseline");
+  assert.equal(loadBaseline(agent, root, () => treeFingerprint({ ...base, snapshot: new Map() }), now), undefined, "the dirty file was committed or reverted → no baseline");
+  assert.equal(loadBaseline(agent, root, () => undefined, now), undefined, "unknown tree state → no baseline");
+  assert.equal(loadBaseline(agent, root, () => fp, now + BASELINE_MAX_AGE_MS + 1), undefined, "older than the maximum age → no baseline");
+  assert.equal(loadBaseline(agent, root, () => fp, now - 86_400_000), undefined, "from the future (clock moved) → no baseline");
+  // installing dependencies changes the state even though git sees nothing
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  writeFileSync(join(root, "node_modules", ".package-lock.json"), "{}");
+  assert.notEqual(treeFingerprint(base), fp, "node_modules appeared");
+  assert.equal(loadBaseline(agent, root, (d) => treeFingerprint({ ...base, dirs: d }), now), undefined);
+  writeFileSync(baselinePath(agent, root), "{ not json");
+  assert.equal(loadBaseline(agent, root, () => fp, now), undefined, "corrupt file → no baseline, no throw");
+  rmSync(baselinePath(agent, root));
+  assert.equal(loadBaseline(agent, "/never", () => fp, now), undefined);
+  assert.ok(!saveBaseline(agent, root, fp, new Map()), "nothing to save");
+  // gitHead: a commit sha in a repository, undefined elsewhere
+  const { execSync } = process.getBuiltinModule("node:child_process") as typeof import("node:child_process");
+  const git = (cmd: string) => execSync(`git -c user.name=t -c user.email=t@t ${cmd}`, { cwd: root, stdio: "ignore" });
+  assert.equal(await gitHead(root), undefined, "not a repository");
+  git("init -q");
+  assert.equal(await gitHead(root), undefined, "no commits yet");
+  write(root, "a.txt", "a\n");
+  git("add -A");
+  git("commit -q -m init");
+  assert.match((await gitHead(root))!, /^[0-9a-f]{40,64}$/);
+  rmSync(agent, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------- storage
+test("storage: pruning removes what nothing can use and keeps profiles that hold notes; a visit touches the profile; forget drops one repository's files", () => {
+  const agent = tmp();
+  const alive = tmp();
+  write(alive, "package.json", JSON.stringify({ name: "alive" }));
+  const goneRoot = join(tmp(), "gone");
+  const goneWithNotes = join(tmp(), "gone-with-notes");
+  const fp = "f".repeat(40);
+  const diag = (root: string) => new Map([[`node:typecheck@${root}`, { label: "typecheck", cwd: root, diag: new Map([["k", 1]]) }]]);
+  const rel = (p: string) => p.slice(agent.length + 1).split(sep).join("/");
+  // alive repository: profile, history, baseline
+  loadOrDetect(agent, alive, config, undefined);
+  appendHistory(agent, alive, "s", { kind: "dream" });
+  saveBaseline(agent, alive, fp, diag(alive));
+  // a repository whose root is gone, without user data: everything goes
+  mkdirSync(goneRoot, { recursive: true });
+  write(goneRoot, "package.json", JSON.stringify({ name: "gone" }));
+  loadOrDetect(agent, goneRoot, config, undefined);
+  appendHistory(agent, goneRoot, "s", { kind: "dream" });
+  saveBaseline(agent, goneRoot, fp, diag(goneRoot));
+  rmSync(goneRoot, { recursive: true, force: true });
+  // a repository whose root is gone but with a note (an unmounted disk?): the profile and its history stay
+  mkdirSync(goneWithNotes, { recursive: true });
+  write(goneWithNotes, "package.json", JSON.stringify({ name: "gwn" }));
+  const g = loadOrDetect(agent, goneWithNotes, config, undefined).stored;
+  updateUser(agent, g, (u) => u.notes.push(makeNote(u.notes, "user", "keep me")));
+  appendHistory(agent, goneWithNotes, "s", { kind: "dream" });
+  rmSync(goneWithNotes, { recursive: true, force: true });
+  // a baseline past its life, an orphan history, a torn write (old) and a write in progress (fresh)
+  require_utimes(baselinePath(agent, alive), new Date(Date.now() - BASELINE_MAX_AGE_MS - 2 * 86_400_000));
+  writeFileSync(join(agent, "project-profile", "history", "0123456789abcdef.jsonl"), "{}\n");
+  writeFileSync(join(agent, "project-profile", "profiles", "x.json.123.tmp"), "");
+  require_utimes(join(agent, "project-profile", "profiles", "x.json.123.tmp"), new Date(Date.now() - 2 * 3_600_000));
+  writeFileSync(join(agent, "project-profile", "profiles", "y.json.456.tmp"), "");
+  const removed = pruneStorage(agent).map(rel);
+  assert.deepEqual(removed.sort(), [rel(profilePath(agent, goneRoot)), rel(historyPath(agent, goneRoot)), rel(baselinePath(agent, goneRoot)), rel(baselinePath(agent, alive)), "project-profile/history/0123456789abcdef.jsonl", "project-profile/profiles/x.json.123.tmp"].sort(), removed.join("\n"));
+  assert.ok(existsSync(profilePath(agent, alive)) && existsSync(historyPath(agent, alive)), "the live repository keeps its files");
+  assert.ok(existsSync(profilePath(agent, goneWithNotes)) && existsSync(historyPath(agent, goneWithNotes)), "notes are never pruned for a missing root");
+  assert.ok(existsSync(join(agent, "project-profile", "profiles", "y.json.456.tmp")), "a fresh tmp file may belong to a write in progress");
+  // not visited for 120 days: gone, notes or not; a visit resets the clock
+  require_utimes(profilePath(agent, goneWithNotes), new Date(Date.now() - PROFILE_MAX_AGE_MS - 86_400_000));
+  require_utimes(profilePath(agent, alive), new Date(Date.now() - PROFILE_MAX_AGE_MS - 86_400_000));
+  loadOrDetect(agent, alive, config, undefined); // the visit
+  assert.ok(Date.now() - statSync(profilePath(agent, alive)).mtimeMs < 60_000, "loadOrDetect touches the profile it uses");
+  assert.deepEqual(pruneStorage(agent).map(rel).sort(), [rel(profilePath(agent, goneWithNotes)), rel(historyPath(agent, goneWithNotes))].sort());
+  // report and forget
+  rmSync(join(agent, "project-profile", "profiles", "y.json.456.tmp"));
+  const logs = tmp();
+  writeFileSync(join(logs, "a.log"), "x".repeat(2048));
+  const report = storageReport(agent, alive, logs);
+  assert.deepEqual(report.dirs.map((d) => [d.name, d.files]), [["profiles", 1], ["history", 1], ["baselines", 0], ["logs", 1]]);
+  assert.deepEqual(report.repo.map((r) => [r.name, r.bytes === undefined ? "none" : "some"]), [["profile", "some"], ["history", "some"], ["baseline", "none"]]);
+  const md = renderStorage(report, agent);
+  assert.ok(md.startsWith("# project-profile storage") && md.includes("- logs: 1 file, 2 KB") && md.includes("## This repository") && md.includes("- baseline: none"), md);
+  assert.deepEqual([formatSize(10), formatSize(2048), formatSize(3 * 1_048_576)], ["10 B", "2 KB", "3.0 MB"]);
+  assert.equal(forgetRepo(agent, alive).length, 2);
+  assert.ok(!existsSync(profilePath(agent, alive)) && !existsSync(historyPath(agent, alive)));
+  assert.deepEqual(forgetRepo(agent, alive), []);
+  rmSync(agent, { recursive: true, force: true });
+  rmSync(alive, { recursive: true, force: true });
+  rmSync(logs, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------- memory (notes)
+test("notes: legacy strings migrate to user notes with stable ids; new notes carry author, date, evidence", () => {
+  const legacy = migrateNotes(["Use tabs", "", 42, { text: "kept", by: "agent", at: "2026-03-04", evidence: "ran it" }, { text: "" }]);
+  assert.deepEqual(legacy.map((n) => [n.text, n.by, n.at, n.evidence]), [
+    ["Use tabs", "user", undefined, undefined],
+    ["kept", "agent", "2026-03-04", "ran it"],
+  ]);
+  assert.deepEqual(migrateNotes(["Use tabs"])[0]!.id, legacy[0]!.id, "the id of a legacy note is deterministic across loads");
+  assert.match(legacy[0]!.id, /^[0-9a-f]{6}$/);
+  assert.deepEqual(migrateNotes(undefined), []);
+
+  // a stored profile written by 1.4 (string notes) loads and is rewritten in the new shape
+  const agent = tmp();
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "x" }));
+  const { stored } = loadOrDetect(agent, root, config, undefined);
+  saveStored(agent, { ...stored, user: { ...stored.user, notes: ["old note"] as unknown as StoredProfile["user"]["notes"] } });
+  const loaded = loadStored(agent, root)!;
+  assert.deepEqual(loaded.user.notes.map((n) => [n.text, n.by]), [["old note", "user"]]);
+
+  const a = makeNote([], "agent", "  tests need   `DATABASE_URL` set ", " npm test failed without it ", "2026-05-06");
+  assert.deepEqual([a.text, a.by, a.at, a.evidence], ["tests need `DATABASE_URL` set", "agent", "2026-05-06", "npm test failed without it"]);
+  const b = makeNote([a], "agent", a.text, undefined, "2026-05-06");
+  assert.notEqual(b.id, a.id, "same text on the same day still gets a distinct id");
+  assert.ok(makeNote([], "user", "x".repeat(1000)).text.length <= 300, "text is clamped");
+  assert.equal(findNote([a, b], "2"), b);
+  assert.equal(findNote([a, b], a.id), a);
+  assert.equal(findNote([a, b], "9"), undefined);
+  assert.equal(duplicateOf([a], "Tests need `DATABASE_URL` set"), a);
+  assert.equal(duplicateOf([a], "something else"), undefined);
+  const listed = listNotes([a], new Map([[a.id, "`x/y` does not exist"]])).join("\n");
+  assert.ok(listed.includes(`1. [${a.id}] (agent, 2026-05-06) tests need`) && listed.includes("may be stale: `x/y` does not exist"), listed);
+  rmSync(agent, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("notes: the prompt shows notes within a budget and references the rest instead of dropping it", () => {
+  const notes = Array.from({ length: 30 }, (_, i) => makeNote([], i % 2 ? "agent" : "user", `note number ${i} about something in this project`, undefined, "2026-01-01"));
+  const lines = renderNotes(notes, new Map(), 400, "~/.pi/agent/project-profile/profiles/abc.json");
+  const shown = lines.filter((l) => !l.startsWith("(+"));
+  assert.ok(shown.length >= 1 && shown.length < 30, `budget keeps ${shown.length} notes`);
+  assert.ok(shown.join("").length <= 400, "within the budget");
+  assert.equal(lines.at(-1), `(+${30 - shown.length} more notes in \`~/.pi/agent/project-profile/profiles/abc.json\` under user.notes)`);
+  assert.ok(/^\(user [0-9a-f]{6}\) note number 0/.test(shown[0]!) && /^\(agent [0-9a-f]{6}\) note number 1/.test(shown[1]!), shown.slice(0, 2).join("|"));
+  // one oversized note still shows (never an empty Notes line with a "+1 more")
+  const big = [makeNote([], "user", "y".repeat(300), undefined, "2026-01-01")];
+  assert.equal(renderNotes(big, new Map(), 50, undefined).length, 1);
+  // stale flag and evidence render inline
+  const n = makeNote([], "agent", "see `src/gone.ts`", "read it", "2026-01-01");
+  assert.deepEqual(renderNotes([n], new Map([[n.id, "`src/gone.ts` does not exist"]]), 1000, undefined), [`(agent ${n.id}) see \`src/gone.ts\` — evidence: read it [may be stale: \`src/gone.ts\` does not exist]`]);
+  assert.deepEqual(renderNotes([], new Map(), 1000, undefined), []);
+});
+
+test("sleep pass: notes naming paths that no longer exist are flagged; overrides equal to detection are redundant", () => {
+  assert.deepEqual(pathTokens("run `scripts/scan.ts` then read `./docs/site/index.html` and `src/` but not `pnpm test`, `https://x/y`, `src/*.ts`, `@scope/pkg@1.2.3`, `a b/c`, `<dir>/x`, `~/.pi/x`, `-p/x`"), ["scripts/scan.ts", "./docs/site/index.html", "src"]);
+  assert.deepEqual(pathTokens("nothing path-like here, `DATABASE_URL`, `package.json`, `i.e`"), [], "bare names are ambiguous and never checked");
+  const root = tmp();
+  write(root, "src/keep.ts", "");
+  const git = tmp();
+  write(git, "tools/x.sh", "");
+  const ok = makeNote([], "user", "edit `src/keep.ts` first", undefined, "2026-01-01");
+  const viaGit = makeNote([], "user", "run `tools/x.sh` (lives at the git root)", undefined, "2026-01-01");
+  const gone = makeNote([], "agent", "`src/old.ts` and `lib/x.ts` hold the config", undefined, "2026-01-01");
+  const abs = makeNote([], "agent", `absolute \`${join(root, "src/keep.ts")}\` is fine`, undefined, "2026-01-01");
+  const plain = makeNote([], "agent", "tests need `DATABASE_URL`", undefined, "2026-01-01");
+  const stale = validateNotes([ok, viaGit, gone, abs, plain], [root, git]);
+  assert.deepEqual(Array.from(stale.entries()), [[gone.id, "`src/old.ts`, `lib/x.ts` do not exist"]]);
+  const agent = tmp();
+  write(root, "package.json", JSON.stringify({ name: "x", scripts: { test: "vitest run", lint: "eslint ." }, devDependencies: { vitest: "2", eslint: "9" } }));
+  const { stored } = loadOrDetect(agent, root, config, undefined);
+  stored.user.overrides = { test: stored.detected.commands["test"]!.cmd, lint: "make lint", build: null, format: "prettier --check ." };
+  assert.deepEqual(redundantOverrides(stored), ["test"]);
+  rmSync(agent, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true });
+  rmSync(git, { recursive: true, force: true });
+});
 
 // ---------------------------------------------------------------- render
 test("prompt section is static and bounded", () => {

@@ -8,6 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { profilePath } from "../profile/store.ts";
+import { historyPath } from "../profile/history.ts";
 
 type Handler = (event: any, ctx: any) => any;
 
@@ -19,9 +20,8 @@ function write(root: string, rel: string, content: string) {
   writeFileSync(join(root, rel), content);
 }
 
-/** Load the extension against a mock π API with its own agent dir (no ~/.pi pollution). */
-async function load() {
-  const agent = tmp();
+/** Load the extension against a mock π API with its own agent dir (no ~/.pi pollution); pass one to continue "the next session". */
+async function load(agent = tmp()) {
   process.env.PI_CODING_AGENT_DIR = agent;
   const mod = await import("../index.ts");
   const handlers: Record<string, Handler[]> = {};
@@ -95,9 +95,9 @@ const prompt = () => ({ systemPromptOptions: { sections: {} as Record<string, st
 const settle = () => ({ outcome: "completed", entries: [] as unknown[], continue: false });
 const text = (r: any) => (r?.entries ?? []).map((e: any) => (typeof e.content === "string" ? e.content : "")).join("\n");
 
-test("registration: one run_checks tool, /profile and /verify, every lifecycle hook", async () => {
+test("registration: run_checks and the two note tools, /profile and /verify, every lifecycle hook", async () => {
   const x = await load();
-  assert.deepEqual(x.tools, ["run_checks"]);
+  assert.deepEqual(x.tools, ["run_checks", "remember", "forget_note"]);
   assert.deepEqual(x.commands.sort(), ["profile", "verify"]);
   for (const e of ["session_start", "session_shutdown", "before_agent_start", "tool_call", "tool_result", "agent_before_settle", "turn_end", "session_compact"]) assert.ok(x.handlers[e]?.length, e);
   x.cleanup();
@@ -200,6 +200,15 @@ test("gate: a failing check sends the agent back; on the next prompt the same fa
   assert.notEqual(second?.continue, true);
   assert.ok(text(second).includes("no new failures") && text(second).includes("typecheck (1 known)"));
   assert.ok(x.notes.some(([, m]) => m.includes("existed before this task")));
+  // both verdicts are in the repository's gate history: labels, rounds and counts, never output
+  const history = readFileSync(historyPath(x.agent, realpathSync(root)), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const verdicts = history.filter((e) => e.kind === "verdict");
+  assert.deepEqual(verdicts.map((e) => [e.seq, e.status, e.round, e.failed, e.known]), [[1, "red", 0, ["typecheck"], 0], [2, "green", 0, [], 1]]);
+  assert.ok(history.every((e) => !JSON.stringify(e).includes("TS2322")), "history holds no diagnostics");
+  assert.ok(history.every((e) => e.s === history[0].s && /^\d{4}-\d{2}-\d{2}T/.test(e.t)), "one session id, ISO timestamps");
+  await x.command("/profile history", ctx);
+  const report = x.reports.at(-1)!;
+  assert.ok(report.startsWith("# Verification history: ") && report.includes("- 2 tasks verified · 1 green on the first attempt") && report.includes("First-attempt failures by check: typecheck 1") && report.includes("✗ typecheck → still red"), report);
   x.cleanup();
   rmSync(root, { recursive: true, force: true });
 });
@@ -261,6 +270,73 @@ test("baseline: a check that already fails when the agent starts reading is pre-
   assert.ok(text(r).includes("no new failures") && text(r).includes("typecheck (1 known)"), text(r));
   assert.equal(x.notes.filter(([, m]) => m.includes("untouched tree") || m.includes("existed before this task")).length, 1, "the user hears about it once");
   x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("baseline cache: the next session on the same tree starts with the last baseline, no background run; a new commit invalidates it", async () => {
+  const root = tmp();
+  const failing = `node -e "console.error('src/old.ts(1,14): error TS2322: Type string is not assignable to type number.'); process.exit(2)"`;
+  write(root, "package.json", JSON.stringify({ name: "demo", scripts: { typecheck: failing } }));
+  write(root, "package-lock.json", "{}");
+  write(root, "tsconfig.json", "{}");
+  write(root, ".gitignore", "node_modules\n");
+  write(root, "src/old.ts", "export const old: number = 'x';\n");
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const { execSync } = process.getBuiltinModule("node:child_process") as typeof import("node:child_process");
+  const git = (cmd: string) => execSync(`git -c user.name=t -c user.email=t@t ${cmd}`, { cwd: root, stdio: "ignore" });
+  git("init -q");
+  git("add -A");
+  git("commit -q -m init");
+  const edit = async (x: Awaited<ReturnType<typeof load>>, ctx: any, content: string) => {
+    const event = { toolName: "write", input: { path: "src/a.ts", content }, content: [{ type: "text", text: "ok" }], isError: false };
+    await x.emit("tool_call", { toolName: "write", input: event.input }, ctx);
+    write(root, "src/a.ts", content);
+    await x.emit("tool_result", event, ctx);
+  };
+  // session 1: the background baseline runs and is persisted
+  const one = await load();
+  const ctx1 = one.ctxFor(root);
+  await one.emit("session_start", {}, ctx1);
+  await one.emit("before_agent_start", prompt(), ctx1);
+  await until(() => one.notes.some(([, m]) => m.includes("already fails on the untouched tree")));
+  assert.ok(existsSync(join(one.agent, "project-profile", "baselines")), "baseline persisted");
+  const cached = JSON.parse(readFileSync(readdirSync(join(one.agent, "project-profile", "baselines")).map((f) => join(one.agent, "project-profile", "baselines", f))[0]!, "utf8"));
+  assert.ok(/^[0-9a-f]{40}$/.test(cached.fingerprint) && Object.values(cached.checks).some((c: any) => c.label === "typecheck" && c.diag.length === 1), JSON.stringify(cached).slice(0, 200));
+  delete process.env.PI_CODING_AGENT_DIR;
+  // session 2, same tree: restored at the first prompt, no "⏳ baseline" run, the failure is known before the first write
+  const two = await load(one.agent);
+  const ctx2 = two.ctxFor(root);
+  await two.emit("session_start", {}, ctx2);
+  await two.emit("before_agent_start", prompt(), ctx2);
+  assert.ok(two.notes.some(([, m]) => m.includes("already fails on the untouched tree (1 diagnostic, baseline from earlier today, tree unchanged)")), two.notes.map(([, m]) => m).join("|"));
+  await edit(two, ctx2, "export const a = 1;\n");
+  const r = await two.emit("agent_before_settle", settle(), ctx2);
+  assert.notEqual(r?.continue, true, "no repair round: the failure was known from the cache");
+  assert.ok(text(r).includes("no new failures") && text(r).includes("typecheck (1 known)"), text(r));
+  assert.ok(!two.statuses.some((t) => t.startsWith("\u23f3 baseline")), "no background baseline run: " + two.statuses.join("|"));
+  delete process.env.PI_CODING_AGENT_DIR;
+  // session 3 after a commit: another tree state, so the cache is ignored and the baseline runs again
+  rmSync(join(root, "src/a.ts"));
+  write(root, "src/b.ts", "export const b = 1;\n");
+  git("add -A");
+  git("commit -q -m more");
+  const three = await load(one.agent);
+  const ctx3 = three.ctxFor(root);
+  await three.emit("session_start", {}, ctx3);
+  await three.emit("before_agent_start", prompt(), ctx3);
+  assert.ok(!three.notes.some(([, m]) => m.includes("tree unchanged")), "not restored after a commit");
+  await until(() => three.statuses.some((t) => t.startsWith("\u23f3 baseline")) || three.notes.some(([, m]) => m.includes("untouched tree")));
+  // config switch: verify.baselineCache=false restores nothing even on the same tree
+  delete process.env.PI_CODING_AGENT_DIR;
+  await until(() => three.notes.some(([, m]) => m.includes("untouched tree")));
+  mkdirSync(join(one.agent, "project-profile"), { recursive: true });
+  writeFileSync(join(one.agent, "project-profile", "config.json"), JSON.stringify({ verify: { baselineCache: false } }));
+  const four = await load(one.agent);
+  const ctx4 = four.ctxFor(root);
+  await four.emit("session_start", {}, ctx4);
+  await four.emit("before_agent_start", prompt(), ctx4);
+  assert.ok(!four.notes.some(([, m]) => m.includes("tree unchanged")));
+  four.cleanup();
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -401,6 +477,9 @@ test("/profile subcommands persist user data the next prompt and report reflect"
   assert.ok(lastNote().startsWith("project-profile: lint = `make lint`"), lastNote());
   await x.command("/profile set lint -", ctx);
   assert.equal(user().overrides.lint, null);
+  await x.command("/profile set lint default", ctx);
+  assert.ok(!("lint" in user().overrides), "default removes the override");
+  assert.ok(lastNote().includes("follows detection again"), lastNote());
   await x.command("/profile set", ctx);
   assert.ok(lastNote().startsWith("usage: /profile set"), lastNote());
 
@@ -417,21 +496,170 @@ test("/profile subcommands persist user data the next prompt and report reflect"
   await x.command("/profile verify default", ctx);
   assert.equal(user().verify, undefined);
 
-  await x.command("/profile note Use tabs", ctx);
-  assert.deepEqual(user().notes, ["Use tabs"]);
   await x.command("/profile notes", ctx);
-  assert.equal(lastNote(), "1. Use tabs");
+  assert.ok(lastNote().startsWith("no notes"), lastNote());
+  await x.command("/profile note Use tabs", ctx);
+  assert.deepEqual(user().notes.map((n: any) => [n.text, n.by, typeof n.id, typeof n.at]), [["Use tabs", "user", "string", "string"]]);
+  await x.command("/profile note See `src/gone.ts`", ctx);
+  const ids = user().notes.map((n: any) => n.id);
+  await x.command("/profile notes", ctx);
+  assert.ok(x.reports.at(-1)!.startsWith("# Notes for ") && x.reports.at(-1)!.includes(`1. [${ids[0]}] (user, `) && x.reports.at(-1)!.includes("Use tabs"), x.reports.at(-1));
+  const p2 = prompt();
+  await x.emit("before_agent_start", p2, ctx);
+  assert.ok(p2.systemPromptOptions.sections["project_profile"]!.includes(`(user ${ids[0]}) Use tabs · (user ${ids[1]}) See \`src/gone.ts\``), "notes are in the prompt with their author and id");
   await x.command("/profile show", ctx);
-  assert.ok(x.reports.at(-1)!.startsWith("# Project profile: ") && x.reports.at(-1)!.includes('- notes: "Use tabs"'), x.reports.at(-1));
+  assert.ok(x.reports.at(-1)!.startsWith("# Project profile: ") && x.reports.at(-1)!.includes("- notes: 2 (") && x.reports.at(-1)!.includes("Use tabs"), x.reports.at(-1));
+  await x.command("/profile notes rm nope", ctx);
+  assert.ok(lastNote().startsWith("project-profile: no note nope"), lastNote());
+  await x.command(`/profile notes rm ${ids[1]}`, ctx);
+  assert.deepEqual(user().notes.map((n: any) => n.text), ["Use tabs"]);
+  await x.command("/profile notes rm 1", ctx);
+  assert.deepEqual(user().notes, []);
+  await x.command("/profile note Again", ctx);
   await x.command("/profile notes clear", ctx);
   assert.deepEqual(user().notes, []);
+  // the sleep pass at session start flags a note whose path no longer exists, in the prompt and to the user
+  await x.command("/profile note Config lives in `src/gone.ts`", ctx);
+  await x.emit("session_start", {}, ctx);
+  assert.ok(x.notes.some(([, m]) => m.includes("1 note may be stale")), x.notes.map(([, m]) => m).join("|"));
+  const p3 = prompt();
+  await x.emit("before_agent_start", p3, ctx);
+  assert.ok(p3.systemPromptOptions.sections["project_profile"]!.includes("`src/gone.ts` [may be stale: `src/gone.ts` does not exist]"), p3.systemPromptOptions.sections["project_profile"]);
+  await x.command("/profile notes clear", ctx);
 
   await x.command("/profile set test make test", ctx);
+  await x.command("/profile storage", ctx);
+  assert.ok(x.reports.at(-1)!.startsWith("# project-profile storage") && x.reports.at(-1)!.includes("- profiles: 1 file") && x.reports.at(-1)!.includes("- history: 1 file") && x.reports.at(-1)!.includes("## This repository"), x.reports.at(-1));
+  await x.command("/profile storage prune", ctx);
+  assert.ok(lastNote().includes("nothing to prune"), lastNote());
+  assert.ok(existsSync(historyPath(x.agent, realpathSync(root))), "the live repository's history survives a prune");
   await x.command("/profile forget", ctx);
   assert.deepEqual(user().overrides, {}, "forget drops user data and re-detects");
+  assert.ok(!existsSync(historyPath(x.agent, realpathSync(root))), "forget drops the history too");
   await x.command("/profile bogus", ctx);
   assert.ok(lastNote().startsWith("usage: /profile [show|"), lastNote());
   x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("memory tools: remember saves an agent note with evidence, forget_note protects user notes except in a dream, /profile dream sends the consolidation message", async () => {
+  const x = await load();
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "demo", scripts: { test: "vitest run" }, devDependencies: { vitest: "2" } }));
+  mkdirSync(join(root, "node_modules"), { recursive: true });
+  const ctx = x.ctxFor(root);
+  await x.emit("session_start", {}, ctx);
+  const user = () => JSON.parse(readFileSync(profilePath(x.agent, realpathSync(root)), "utf8")).user;
+  const call = async (tool: string, params: Record<string, unknown>) => {
+    const r = await x.impl[tool]!.execute("id", params, undefined, undefined, ctx);
+    return { text: r.content.map((c) => c.text).join("\n"), error: !!r.isError };
+  };
+  await x.emit("before_agent_start", prompt(), ctx);
+  // nothing to consolidate yet
+  await x.command("/profile dream", ctx);
+  assert.ok(x.notes.at(-1)![1].includes("nothing to dream about"), x.notes.at(-1)![1]);
+  assert.equal(x.sent.length, 0);
+
+  const saved = await call("remember", { text: "  Tests need `DATABASE_URL`   set to a local Postgres ", evidence: "npm test failed with ECONNREFUSED without it" });
+  assert.ok(!saved.error && /^saved note \[[0-9a-f]{6}\]/.test(saved.text), saved.text);
+  const id = saved.text.match(/\[([0-9a-f]{6})\]/)![1]!;
+  assert.deepEqual(user().notes.map((n: any) => [n.id, n.by, n.text, n.evidence]), [[id, "agent", "Tests need `DATABASE_URL` set to a local Postgres", "npm test failed with ECONNREFUSED without it"]]);
+  assert.ok(x.notes.at(-1)![1].startsWith(`project-profile: the agent noted [${id}]`), "the user is told");
+  const dup = await call("remember", { text: "tests need `DATABASE_URL` set to a local postgres" });
+  assert.ok(!dup.error && dup.text.startsWith(`already noted as [${id}]`), dup.text);
+  assert.equal(user().notes.length, 1);
+  assert.ok((await call("remember", { text: "   " })).error);
+  const p = prompt();
+  await x.emit("before_agent_start", p, ctx);
+  const section = p.systemPromptOptions.sections["project_profile"]!;
+  assert.ok(section.includes(`(agent ${id}) Tests need \`DATABASE_URL\` set to a local Postgres — evidence: npm test failed with ECONNREFUSED without it`), section);
+  assert.ok(section.includes("The `remember` tool saves a note for future sessions"), "the preamble says what memory is for");
+
+  // a user note: the agent may not remove it outside a dream
+  await x.command("/profile note Keep the Makefile; `make check` is what CI runs", ctx);
+  const userId = user().notes[1].id;
+  const refused = await call("forget_note", { id: userId });
+  assert.ok(refused.error && refused.text.includes("written by the user") && refused.text.includes(`/profile notes rm ${userId}`), refused.text);
+  assert.equal(user().notes.length, 2);
+  assert.ok((await call("forget_note", { id: "ffffff" })).error);
+  // its own note it may remove
+  const gone = await call("forget_note", { id, reason: "the README now documents it" });
+  assert.ok(!gone.error && gone.text.startsWith(`removed note [${id}] (agent). 1 note left.`), gone.text);
+  assert.ok(x.notes.at(-1)![1].includes("the agent removed note") && x.notes.at(-1)![1].includes("the README now documents it"));
+
+  // the agent-note limit
+  for (let i = 0; i < 25; i++) assert.ok(!(await call("remember", { text: `fact number ${i} about this project` })).error);
+  const full = await call("remember", { text: "one too many" });
+  assert.ok(full.error && full.text.includes("limit reached: 25 agent notes"), full.text);
+  assert.equal(user().notes.length, 26);
+
+  // /profile dream: the message lists the notes with ids and the history, asks for consolidation, and lets the run remove user notes
+  await x.command("/profile dream", ctx);
+  const dream = x.sent.at(-1)!;
+  assert.ok(dream.content.startsWith("[project-profile] Dream: consolidate this project's memory"), dream.content);
+  assert.ok(dream.content.includes(`[${userId}] (user, `) && dream.content.includes("`make check`") && dream.content.includes("Verification history") && dream.content.includes("Do not change any file in the repository"), dream.content);
+  assert.ok(!dream.content.includes("[verification]"));
+  const inDream = await call("forget_note", { id: userId, reason: "CI now runs npm test" });
+  assert.ok(!inDream.error, inDream.text);
+  assert.equal(user().notes.length, 25);
+  // the dream ends at the run's settle boundary: user notes are protected again
+  await x.command("/profile note Another user note", ctx);
+  const userId2 = user().notes.at(-1).id;
+  await x.emit("agent_before_settle", settle(), ctx);
+  assert.ok((await call("forget_note", { id: userId2 })).error, "protected after the dream run settled");
+  // a user prompt also ends a dream
+  await x.command("/profile dream", ctx);
+  await x.emit("before_agent_start", prompt(), ctx);
+  assert.ok((await call("forget_note", { id: userId2 })).error, "protected once the user prompts");
+  // ... but a run that before_agent_start reports as custom-started (π ≥ 1.5) keeps dreaming
+  await x.command("/profile dream", ctx);
+  await x.emit("before_agent_start", { ...prompt(), messageType: "custom" }, ctx);
+  assert.ok(!(await call("forget_note", { id: userId2 })).error, "still dreaming in the custom-started run");
+  // history recorded the note events and the dreams
+  const history = readFileSync(historyPath(x.agent, realpathSync(root)), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(history.filter((e) => e.kind === "dream").length, 3);
+  assert.ok(history.some((e) => e.kind === "note" && e.action === "add" && e.by === "agent" && e.id === id));
+  assert.ok(history.some((e) => e.kind === "note" && e.action === "remove" && e.by === "agent" && e.id === userId));
+  x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("memory tools are not registered when profile.agentNotes is off, and the prompt does not mention them", async () => {
+  const agent = tmp();
+  mkdirSync(join(agent, "project-profile"), { recursive: true });
+  writeFileSync(join(agent, "project-profile", "config.json"), JSON.stringify({ profile: { agentNotes: false } }));
+  process.env.PI_CODING_AGENT_DIR = agent;
+  const mod = await import("../index.ts");
+  const tools: string[] = [];
+  const commandImpl: Record<string, { handler: (args: string, ctx: any) => Promise<void> }> = {};
+  const handlers: Record<string, Handler[]> = {};
+  mod.default({
+    on: (e: string, h: Handler) => {
+      (handlers[e] ??= []).push(h);
+      return () => {};
+    },
+    registerTool: (t: { name: string }) => tools.push(t.name),
+    registerCommand: (n: string, o: any) => {
+      commandImpl[n] = o;
+    },
+    registerMessageRenderer: () => {},
+    registerEntryRenderer: () => {},
+    appendEntry: () => {},
+    sendMessage: () => {},
+  } as any);
+  assert.deepEqual(tools, ["run_checks"]);
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "demo" }));
+  const notes: string[] = [];
+  const ctx = { cwd: root, mode: "print", hasUI: false, isProjectTrusted: () => true, ui: { notify: (m: string) => notes.push(m), setStatus: () => {}, select: async () => undefined }, sessionManager: { getBranch: () => [] } };
+  for (const h of handlers["session_start"]!) await h({}, ctx);
+  const p = prompt();
+  for (const h of handlers["before_agent_start"]!) await h(p, ctx);
+  assert.ok(!p.systemPromptOptions.sections["project_profile"]!.includes("`remember`"));
+  await commandImpl["profile"]!.handler("dream", ctx);
+  assert.ok(notes.at(-1)!.includes("profile.agentNotes"), notes.at(-1));
+  delete process.env.PI_CODING_AGENT_DIR;
+  rmSync(agent, { recursive: true, force: true });
   rmSync(root, { recursive: true, force: true });
 });
 

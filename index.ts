@@ -22,16 +22,20 @@ import { agentDir, configPath, loadConfig, writeDefaultConfig } from "./config.t
 import { findProjectRoot, nearestProjectDir } from "./detect/index.ts";
 import { exists, ext, readText, realpath, tildify, uniq } from "./fs-utils.ts";
 import { availability, effectiveChecks, effectiveCommands, renderPromptSection, renderReport, tierAllowed } from "./profile/render.ts";
-import { deleteStored, loadOrDetect, profilePath, pruneProfiles, updateUser } from "./profile/store.ts";
+import { loadOrDetect, profilePath, updateUser } from "./profile/store.ts";
+import { forgetRepo, pruneStorage, renderStorage, storageReport } from "./profile/storage.ts";
 import { checkKey, type Check, type GateVerdict, type ProfileConfig, type StoredProfile, type Tier } from "./types.ts";
 import { collectChanges, displayPath, newTracker, peekChanges, snapshotStart, toolPath, type ChangeTracker } from "./verify/changes.ts";
 import { describeRuns, runGate, type GateHooks } from "./verify/gate.ts";
 import { buildPlan, isIgnoredPath, TIER_ORDER, type PlannedCheck } from "./verify/plan.ts";
 import { logDir, pruneLogs } from "./verify/run.ts";
 import { diagCount } from "./verify/baseline.ts";
+import { baselinePath, gitHead, loadBaseline, saveBaseline, treeFingerprint } from "./verify/baseline-cache.ts";
 import { collectFindings, formatFinding, headContent, isWeakening, mustFix, readForDiff, SKIP, type Before, type Finding } from "./verify/findings.ts";
 import { fixHint } from "./verify/hints.ts";
 import { doctorReport } from "./profile/doctor.ts";
+import { duplicateOf, findNote, listNotes, makeNote, MAX_AGENT_NOTES, MAX_EVIDENCE_CHARS, MAX_NOTE_CHARS, redundantOverrides, validateNotes } from "./profile/memory.ts";
+import { appendHistory, historyForDream, historyPath, readHistory, renderHistory, summarizeHistory, type HistoryInput } from "./profile/history.ts";
 import { discoverRules, generatedPatterns, generatedReason, matchingRules, nestedInstructionFiles, readInstruction, renderInjection, type InjectionPart, type ScopedRule } from "./profile/scoped.ts";
 import { appendFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
@@ -39,6 +43,8 @@ import { dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 
 const VERIFY_MSG = "project-profile/verify";
+/** The custom message that starts a `/profile dream` run (see SessionState.dreaming). */
+const DREAM_MSG = "project-profile/dream";
 const DEBUG = !!process.env.PI_PROJECT_PROFILE_DEBUG;
 function debug(event: string, data: Record<string, unknown> = {}): void {
   if (!DEBUG) return;
@@ -105,6 +111,8 @@ interface SessionState {
   supersededIds: Set<string>;
   /** Last full-run diagnostics per check (id@cwd): the source of the pre-existing-failure baseline. */
   lastDiag: Map<string, Map<string, number>>;
+  /** Label and directory of each lastDiag entry (the persisted baseline names checks to the user). */
+  diagMeta: Map<string, { label: string; cwd: string }>;
   /** lastDiag frozen when the current prompt started. */
   promptBaseline: Map<string, Map<string, number>>;
   /** Checks whose pre-existing failures were already reported to the user this session. */
@@ -121,6 +129,16 @@ interface SessionState {
   genPatterns: string[];
   /** Generated files already warned about this session. */
   generatedWarned: Set<string>;
+  /** Sleep pass over the notes at session start: note id → why it may be stale. Recomputed on refresh. */
+  stale: Map<string, string>;
+  /** Short random id that groups this session's history events (prompt seq restarts per session). */
+  sessionId: string;
+  /**
+   * A `/profile dream` run is in progress: the agent consolidates notes and may remove the user's. Set by the
+   * command; cleared by the next user-started run and at the run's first settle boundary. Session-level because
+   * a run started by a custom message emits before_agent_start only in newer π versions.
+   */
+  dreaming: boolean;
   mode: string;
   hasUI: boolean;
 }
@@ -221,6 +239,34 @@ export default function projectProfile(pi: ExtensionAPI) {
     }
   }
 
+  /** Append to this repository's gate history (dates, labels, rounds, reasons — never code or output). */
+  function record(ev: HistoryInput): void {
+    if (s?.stored) appendHistory(dir, s.root, s.sessionId, ev);
+  }
+
+  /** A fix hint without its file arguments, so the same hint counts as one across tasks. */
+  function hintShape(hint: string): string {
+    return hint
+      .split(" ")
+      .filter((t) => !(t.includes("/") && !t.startsWith("-")) && !/^['"]/.test(t) && !/\.\w{1,5}$/.test(t))
+      .join(" ");
+  }
+
+  /**
+   * Sleep pass: validate memory against ground truth without a model call. Notes that name paths
+   * that no longer exist and overrides that detection now reproduces are flagged to the user (and the
+   * stale notes in the prompt), never removed: the user or a `/profile dream` decides.
+   */
+  function sleepPass(ctx: ExtensionContext, stored: StoredProfile, announce: boolean): void {
+    const st = s!;
+    st.stale = validateNotes(stored.user.notes, uniq([st.root, st.gitRoot ?? st.root]));
+    invalidateSection();
+    if (!announce) return;
+    if (st.stale.size) notify(ctx, `project-profile: ${st.stale.size} note${st.stale.size === 1 ? "" : "s"} may be stale (a path it names no longer exists) — /profile notes`, "info");
+    const redundant = redundantOverrides(stored);
+    if (redundant.length) notify(ctx, `project-profile: detection now gives the same ${redundant.length === 1 ? "command" : "commands"} as your override${redundant.length === 1 ? "" : "s"} for ${redundant.join(", ")} — ${redundant.map((k) => `/profile set ${k} default`).join("; ")} removes ${redundant.length === 1 ? "it" : "them"}`, "info");
+  }
+
   /** Checks that cannot run: told once per check and session, one message per cause (a missing pnpm stops every pnpm check). */
   function reportEnvFailures(ctx: ExtensionContext, verdict: GateVerdict) {
     const byReason = new Map<string, GateVerdict["runs"]>();
@@ -241,6 +287,7 @@ export default function projectProfile(pi: ExtensionAPI) {
       const labels = uniq(runs.map((r) => r.check.label)).join(", ");
       const logs = runs.flatMap((r) => (r.logPath ? [tildify(r.logPath)] : []));
       const log = logs.length ? ` · log${logs.length > 1 ? "s" : ""}: ${logs.join(", ")}` : "";
+      record({ kind: "env", seq: s!.prompt.seq, reason, checks: uniq(runs.map((r) => r.check.label)) });
       notify(ctx, `verify: ${list}${where} disabled this session — ${reason}${log}. Fix it, then /profile refresh.`, "warning");
       pi.sendMessage(
         { customType: VERIFY_MSG, content: `[verification] ${list}${where} could not run and ${one ? "is" : "are"} disabled for this session — ${reason}${log}. Nothing verified ${one ? runs[0]!.check.label : "them"} for you: do not assume ${one ? "it passes" : "they pass"}.`, display: true, details: { seq: -1, kind: "env", headline: `${labels}${where} unavailable: ${reason}` } },
@@ -253,8 +300,57 @@ export default function projectProfile(pi: ExtensionAPI) {
   function recordDiag(verdict: GateVerdict) {
     for (const r of verdict.runs) {
       if (!r.diag || r.scoped) continue;
-      if (r.status === "pass" || r.status === "fail" || r.status === "preexisting") s!.lastDiag.set(checkKey(r.check), r.diag);
+      if (r.status === "pass" || r.status === "fail" || r.status === "preexisting") {
+        s!.lastDiag.set(checkKey(r.check), r.diag);
+        s!.diagMeta.set(checkKey(r.check), { label: r.check.label, cwd: r.check.cwd });
+      }
     }
+  }
+
+  /** The tree state the current lastDiag describes, or undefined when it cannot be known (no git, no status). */
+  async function fingerprintNow(dirs: string[]): Promise<string | undefined> {
+    const st = s!;
+    if (!st.stored || !st.gitRoot || !st.tracker.snapshot) return undefined;
+    const head = await gitHead(st.gitRoot);
+    return treeFingerprint({ head, snapshot: st.tracker.snapshot, manifests: st.stored.detected.fingerprint, dirs: uniq([st.root, st.gitRoot, ...dirs]) });
+  }
+
+  /** Keep the baseline for the next session on the same tree (verify.baselineCache). */
+  async function persistBaseline(): Promise<void> {
+    const st = s!;
+    if (!st.config.verify.baselineCache || !st.stored || st.lastDiag.size === 0) return;
+    const entries = new Map<string, { label: string; cwd: string; diag: Map<string, number> }>();
+    for (const [key, diag] of st.lastDiag) {
+      const meta = st.diagMeta.get(key);
+      if (meta) entries.set(key, { ...meta, diag });
+    }
+    const fp = await fingerprintNow(Array.from(entries.values()).map((e) => e.cwd));
+    if (!fp) return;
+    const ok = saveBaseline(dir, st.root, fp, entries);
+    debug("baseline-save", { ok, checks: Array.from(entries.keys()) });
+  }
+
+  /** Start the session with the last session's baseline when the tree has not changed since (first prompt only). */
+  async function restoreBaseline(ctx: ExtensionContext): Promise<void> {
+    const st = s!;
+    if (!st.config.verify.baselineCache || !st.stored || !st.gitRoot || !st.tracker.snapshot || st.lastDiag.size > 0) return;
+    if (!exists(baselinePath(dir, st.root))) return; // nothing cached: no git call
+    const head = await gitHead(st.gitRoot);
+    if (!head) return;
+    const snapshot = st.tracker.snapshot;
+    const manifests = st.stored.detected.fingerprint;
+    const found = loadBaseline(dir, st.root, (dirs) => treeFingerprint({ head, snapshot, manifests, dirs: uniq([st.root, st.gitRoot!, ...dirs]) }));
+    if (!found) return;
+    const ageDays = Math.max(0, Math.round((Date.now() - Date.parse(found.at)) / 86_400_000));
+    for (const [key, e] of found.checks) {
+      st.lastDiag.set(key, e.diag);
+      st.diagMeta.set(key, { label: e.label, cwd: e.cwd });
+      const n = diagCount(e.diag);
+      if (n === 0 || st.notifiedKnown.has(key)) continue;
+      st.notifiedKnown.add(key);
+      notify(ctx, `verify: ${e.label}${whereOf(e.cwd)} already fails on the untouched tree (${n} diagnostic${n === 1 ? "" : "s"}, baseline from ${ageDays === 0 ? "earlier today" : ageDays === 1 ? "yesterday" : `${ageDays} days ago`}, tree unchanged) — only new failures are sent to the agent`, "info");
+    }
+    debug("baseline-restore", { at: found.at, checks: Array.from(found.checks.keys()) });
   }
 
   /**
@@ -293,14 +389,19 @@ export default function projectProfile(pi: ExtensionAPI) {
       for (const [k, v] of hooks.broken) st.broken.set(k, v);
       reportEnvFailures(ctx, verdict);
       recordDiag(verdict);
+      await persistBaseline();
+      const failed: Array<{ label: string; count: number }> = [];
       for (const r of verdict.runs) {
         if (!r.diag || r.scoped) continue;
         const key = checkKey(r.check);
         st.promptBaseline.set(key, r.diag);
-        if (r.status !== "fail" || st.notifiedKnown.has(key)) continue;
+        if (r.status !== "fail") continue;
+        failed.push({ label: r.check.label, count: diagCount(r.diag) });
+        if (st.notifiedKnown.has(key)) continue;
         st.notifiedKnown.add(key);
         notify(ctx, `verify: ${r.check.label}${whereOf(r.check.cwd)} already fails on the untouched tree (${diagCount(r.diag)} diagnostic${diagCount(r.diag) === 1 ? "" : "s"}) \u2014 only new failures are sent to the agent`, "info");
       }
+      if (failed.length) record({ kind: "baseline", dir: displayPath(st.root, projectDir) || ".", failed });
     })()
       .catch((err: Error) => debug("baseline-error", { dir: projectDir, error: err.message }))
       .finally(() => {
@@ -391,6 +492,7 @@ export default function projectProfile(pi: ExtensionAPI) {
     const secrets = found.filter((f) => f.kind === "secret" || f.kind === "env-file");
     notify(ctx, `verify: this task's changes include ${summary}${secrets.length ? ` — check ${uniq(secrets.map((f) => f.file)).join(", ")} before committing` : ""}`, secrets.length ? "warning" : "info");
     debug("findings", { seq: st.prompt.seq, cont, found: found.map((f) => ({ kind: f.kind, file: f.file, lines: f.lines })) });
+    record({ kind: "findings", seq: st.prompt.seq, kinds: uniq(found.map((f) => f.kind)), cont });
     const lines = ["[verification] review of this task's changes:", ...found.map(formatFinding), ""];
     if (gamed) lines.push("This task made these changes while verification was failing. Undo them and fix the underlying problem; if one is genuinely needed, keep it and justify it in your final message to the user.");
     else if (cont) {
@@ -458,6 +560,8 @@ export default function projectProfile(pi: ExtensionAPI) {
     if (changed.length) lines.push(`Files changed this run: ${changed.slice(0, 12).join(", ")}${changed.length > 12 ? ` (+${changed.length - 12})` : ""}.`);
     lines.push("");
     lines.push("Fix the underlying cause in the code, then end your turn; verification re-runs automatically. Do not skip, disable, or loosen the check, do not add ignore/suppress comments to silence it, and do not claim success while it fails. If the failure is pre-existing and unrelated to your change, say so explicitly and stop.");
+    // The learning loop: a failure whose cause was a project fact the profile does not show is worth a note, with how it was verified.
+    if (st.config.profile.agentNotes) lines.push("If the cause turns out to be a fact about this project that the profile did not tell you (a command that must run first, an environment variable, a convention no check enforces), save it with `remember` once you have confirmed the fix, with the evidence. Skip that when the cause was in your own change.");
     return lines.join("\n");
   }
 
@@ -532,6 +636,14 @@ export default function projectProfile(pi: ExtensionAPI) {
     return box;
   });
 
+  pi.registerMessageRenderer(DREAM_MSG, (message, { expanded, outputPad }, theme) => {
+    const box = new Box(outputPad, 1, (t) => theme.bg("customMessageBg", t));
+    box.addChild(new Text(`${theme.fg("accent", "[profile]")} dream: consolidate this project's notes`, 0, 0));
+    if (expanded) box.addChild(new Markdown(typeof message.content === "string" ? message.content : "", 0, 0, getMarkdownTheme()));
+    else box.addChild(new Text(theme.fg("dim", "  (ctrl+o to expand)"), 0, 0));
+    return box;
+  });
+
   pi.registerEntryRenderer<{ markdown: string }>(REPORT_ENTRY, (entry, { expanded }, theme) => {
     const box = new Box(1, 1, (t) => theme.bg("customMessageBg", t));
     const md = entry.data?.markdown ?? "";
@@ -563,6 +675,7 @@ export default function projectProfile(pi: ExtensionAPI) {
       abort: new AbortController(),
       supersededIds: new Set(),
       lastDiag: new Map(),
+      diagMeta: new Map(),
       promptBaseline: new Map(),
       notifiedKnown: new Set(),
       baselines: new Map(),
@@ -570,12 +683,16 @@ export default function projectProfile(pi: ExtensionAPI) {
       injected: new Set(),
       genPatterns: generatedPatterns(readText(join(gitRoot ?? root, ".gitattributes"))),
       generatedWarned: new Set(),
+      stale: new Map(),
+      sessionId: Math.random().toString(36).slice(2, 8),
+      dreaming: false,
       mode: ctx.mode,
       hasUI: ctx.hasUI,
     };
     for (const i of issues) notify(ctx, `project-profile config: ${i}`, "warning");
     pruneLogs();
-    pruneProfiles(dir);
+    const pruned = pruneStorage(dir);
+    if (pruned.length) debug("prune", { removed: pruned.map(tildify) });
     // The home directory is not a project: profiling it would put its private layout into the prompt and run nothing useful.
     if (root === realpath(homedir())) {
       setStatus(ctx, "no project (home directory)");
@@ -584,7 +701,8 @@ export default function projectProfile(pi: ExtensionAPI) {
     try {
       const { stored, refreshed } = loadOrDetect(dir, root, config, gitRoot);
       s.stored = stored;
-      debug("session_start", { cwd: ctx.cwd, root, gitRoot, refreshed, mode: ctx.mode, hasUI: ctx.hasUI, checks: effectiveChecks(stored).map((c) => `${c.tier}:${c.cmd}`) });
+      sleepPass(ctx, stored, true);
+      debug("session_start", { cwd: ctx.cwd, root, gitRoot, refreshed, mode: ctx.mode, hasUI: ctx.hasUI, checks: effectiveChecks(stored).map((c) => `${c.tier}:${c.cmd}`), stale: Array.from(s.stale.keys()) });
       const checks = effectiveChecks(stored);
       const auto = checks.filter((c) => (c.tier === "fast" || c.tier === "lint") && !availability(c)).length;
       const langs = stored.detected.languages.slice(0, 3).join("/") || "unknown stack";
@@ -612,20 +730,22 @@ export default function projectProfile(pi: ExtensionAPI) {
     if (!s) return;
     // new user prompt → new repair budget
     s.prompt = newPrompt(s.prompt.seq + 1);
+    if ((event as { messageType?: string }).messageType !== "custom") s.dreaming = false;
     s.turnFiles.clear();
     s.turnBash = false;
-    // Failures recorded before this prompt are pre-existing for the whole prompt.
-    s.promptBaseline = new Map(s.lastDiag);
     if (verifyEnabled()) {
       await snapshotStart(s.tracker);
       s.prompt.startSnapshot = s.tracker.snapshot ? new Map(s.tracker.snapshot) : undefined;
-      if (s.stored) startBaseline(ctx, s.root);
+      if (s.prompt.seq === 1) await restoreBaseline(ctx);
     }
+    // Failures recorded before this prompt (in this session, or in the last one on the same tree) are pre-existing for the whole prompt.
+    s.promptBaseline = new Map(s.lastDiag);
+    if (verifyEnabled() && s.stored) startBaseline(ctx, s.root);
     if (!s.config.profile.inject || !s.stored) return;
     const loaded = event.systemPromptOptions.contextFiles.map((f) => f.path);
     const key = `${s.stored.updatedAt}|${verifyEnabled()}|${loaded.join(",")}`;
     if (s.renderedKey !== key || !s.renderedSection) {
-      s.renderedSection = renderPromptSection(s.stored, s.config, { verifyEnabled: verifyEnabled(), piLoadedContextFiles: loaded });
+      s.renderedSection = renderPromptSection(s.stored, s.config, { verifyEnabled: verifyEnabled(), piLoadedContextFiles: loaded, stale: s.stale, notesPath: tildify(profilePath(dir, s.root)) });
       s.renderedKey = key;
     }
     event.systemPromptOptions.sections["project_profile"] = s.renderedSection;
@@ -745,7 +865,9 @@ export default function projectProfile(pi: ExtensionAPI) {
 
   // ------------------------------------------------------------------ the gate
   pi.on("agent_before_settle", async (event, ctx) => {
-    if (!s || !s.stored || !verifyEnabled()) return;
+    if (!s) return;
+    s.dreaming = false;
+    if (!s.stored || !verifyEnabled()) return;
     if (event.outcome !== "completed") return;
     if (s.gateRunning) return;
     if (!ctx.isProjectTrusted()) return;
@@ -775,9 +897,15 @@ export default function projectProfile(pi: ExtensionAPI) {
       setStatus(ctx, "⏳ verifying…");
       const verdict = await runGate(plan, st.config, hooks);
       recordDiag(verdict);
+      await persistBaseline();
       st.lastVerdict = verdictLine(verdict);
       debug("verdict", { seq: st.prompt.seq, status: verdict.status, ms: verdict.durationMs, runs: verdict.runs.map((r) => ({ id: r.check.id, status: r.status, code: r.exitCode, ms: r.durationMs, reason: r.reason, lines: r.summary.length, known: r.preexisting })) });
       reportEnvFailures(ctx, verdict);
+      {
+        const failing = verdict.runs.filter((r) => r.status === "fail");
+        const hints = uniq(failing.map((r) => hintFor(r, verdict.changedFiles)).filter((h): h is string => !!h).map(hintShape));
+        record({ kind: "verdict", seq: st.prompt.seq, status: verdict.status, round: st.prompt.repairRound, failed: uniq(failing.map((r) => r.check.label)), known: verdict.runs.reduce((n, r) => n + (r.preexisting ?? 0), 0), ms: verdict.durationMs, ...(hints.length ? { hints } : {}) });
+      }
       const max = st.config.verify.maxRepairRounds;
       if (verdict.status === "green") {
         setStatus(ctx, statusText(verdict));
@@ -810,6 +938,7 @@ export default function projectProfile(pi: ExtensionAPI) {
         else if (st.prompt.lastSignature && st.prompt.lastSignature === verdict.signature) stopReason = "the same failure repeated with no progress";
         if (stopReason) {
           debug("giveup", { seq: st.prompt.seq, stopReason });
+          record({ kind: "giveup", seq: st.prompt.seq, reason: stopReason, failed: failingLabels.split(", ") });
           st.prompt.finalized = true;
           st.prompt.pendingRepair = false;
           st.prompt.mustRun = [];
@@ -1013,10 +1142,102 @@ export default function projectProfile(pi: ExtensionAPI) {
     },
   });
 
+  // ------------------------------------------------------------------ memory tools (the agent's channel to the notes)
+  const short = (t: string) => (t.length > 60 ? t.slice(0, 57) + "…" : t);
+  const bootConfig = loadConfig(dir).config;
+  if (bootConfig.profile.agentNotes) {
+    pi.registerTool({
+      name: "remember",
+      label: "Remember a project note",
+      annotations: { readOnlyHint: false, destructiveHint: false, idempotentHint: true, openWorldHint: false },
+      description: `Save a note about this project for future sessions. It is kept outside the repository and shown under Notes in <project_profile>. Use it for a fact the project's files do not show and that cost effort to learn: a command that must run before another, an environment variable the tests need, a convention no check enforces, a trap you fell into. Not for what the repository, its instruction files or the profile already state, and not for task progress. Say how you know it is true in evidence. At most ${MAX_AGENT_NOTES} agent notes per project: merge or remove (forget_note) before adding more.`,
+      promptSnippet: "Save a fact about this project for future sessions (one the repository does not show)",
+      parameters: Type.Object({
+        text: Type.String({ description: `The note, one or two sentences (max ${MAX_NOTE_CHARS} characters). Put paths and commands in backticks.` }),
+        evidence: Type.Optional(Type.String({ description: `How you verified it: what you ran or read (max ${MAX_EVIDENCE_CHARS} characters).` })),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const fail = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined, isError: true });
+        if (!s?.stored) return fail("no project profile for this directory: nothing to attach a note to");
+        if (!s.config.profile.agentNotes) return fail("agent notes are disabled (profile.agentNotes); tell the user what you wanted to note");
+        const stored = s.stored;
+        const text = params.text.trim();
+        if (!text) return fail("the note is empty");
+        const dup = duplicateOf(stored.user.notes, text);
+        if (dup) return { content: [{ type: "text" as const, text: `already noted as [${dup.id}] (${dup.by}); nothing saved` }], details: undefined };
+        const agentNotes = stored.user.notes.filter((n) => n.by === "agent").length;
+        if (agentNotes >= MAX_AGENT_NOTES) return fail(`limit reached: ${MAX_AGENT_NOTES} agent notes exist for this project. Remove or merge one with forget_note first, or ask the user to run /profile dream.`);
+        let id = "";
+        updateUser(dir, stored, (u) => {
+          const n = makeNote(u.notes, "agent", text, params.evidence);
+          u.notes.push(n);
+          id = n.id;
+          record({ kind: "note", action: "add", by: "agent", id: n.id, text: n.text.slice(0, 80) });
+        });
+        invalidateSection();
+        notify(ctx, `project-profile: the agent noted [${id}] “${short(text)}” — /profile notes rm ${id} removes it`, "info");
+        debug("note-add", { id, by: "agent", seq: s.prompt.seq });
+        return { content: [{ type: "text" as const, text: `saved note [${id}]; it appears under Notes in <project_profile> from the next prompt on. ${stored.user.notes.length} note${stored.user.notes.length === 1 ? "" : "s"} for this project.` }], details: undefined };
+      },
+    });
+    pi.registerTool({
+      name: "forget_note",
+      label: "Forget a project note",
+      annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: true, openWorldHint: false },
+      description: "Remove one of this project's notes by its id (shown next to each note in <project_profile>). Use it when a note proved wrong, duplicates another, or the repository now states it. Notes written by the user can be removed only during /profile dream; otherwise tell the user which note to remove.",
+      promptSnippet: "Remove a project note that proved wrong or redundant",
+      parameters: Type.Object({
+        id: Type.String({ description: "The note id, six hex characters." }),
+        reason: Type.Optional(Type.String({ description: "Why it goes (shown to the user)." })),
+      }),
+      async execute(_id, params, _signal, _onUpdate, ctx) {
+        const fail = (text: string) => ({ content: [{ type: "text" as const, text }], details: undefined, isError: true });
+        if (!s?.stored) return fail("no project profile for this directory");
+        if (!s.config.profile.agentNotes) return fail("agent notes are disabled (profile.agentNotes)");
+        const stored = s.stored;
+        const target = findNote(stored.user.notes, params.id);
+        if (!target || target.id !== params.id.trim()) return fail(`no note with id ${params.id}; ids are shown in <project_profile> under Notes`);
+        if (target.by === "user" && !s.dreaming) return fail(`note [${target.id}] was written by the user; only the user can remove it (/profile notes rm ${target.id}), or a /profile dream run. Explain to the user why it should go.`);
+        updateUser(dir, stored, (u) => {
+          u.notes = u.notes.filter((n) => n.id !== target.id);
+        });
+        record({ kind: "note", action: "remove", by: "agent", id: target.id, text: target.text.slice(0, 80) });
+        s.stale.delete(target.id);
+        invalidateSection();
+        notify(ctx, `project-profile: the agent removed note [${target.id}] “${short(target.text)}”${params.reason ? ` — ${params.reason}` : ""}`, "info");
+        debug("note-remove", { id: target.id, by: target.by, seq: s.prompt.seq, dreaming: s.dreaming });
+        return { content: [{ type: "text" as const, text: `removed note [${target.id}] (${target.by}). ${stored.user.notes.length} note${stored.user.notes.length === 1 ? "" : "s"} left.` }], details: undefined };
+      },
+    });
+  }
+
+  /** The dream message: everything the agent needs to consolidate memory, and what memory is for. */
+  function dreamMessage(stored: StoredProfile): string {
+    const st = s!;
+    const lines: string[] = ["[project-profile] Dream: consolidate this project's memory. There is no task now; this run is about the notes.", ""];
+    lines.push("Notes (id, author, date; ⚠ = the sleep pass found that a path the note names no longer exists):");
+    lines.push(...(stored.user.notes.length ? listNotes(stored.user.notes, st.stale) : ["(none)"]));
+    const overrides = Object.entries(stored.user.overrides);
+    if (overrides.length) {
+      const redundant = new Set(redundantOverrides(stored));
+      lines.push("");
+      lines.push("Command overrides set by the user (not yours to change; mention one that looks wrong):");
+      for (const [k, v] of overrides) lines.push(`- ${k} = ${v === null ? "(disabled)" : `\`${v}\``}${redundant.has(k) ? " — detection now gives the same command; the user can drop it with `/profile set " + k + " default`" : ""}`);
+    }
+    const dream = historyForDream(summarizeHistory(readHistory(dir, st.root)));
+    lines.push("");
+    lines.push("Verification history (what the gate observed in this repository):");
+    lines.push(...(dream.length ? dream.map((l) => `- ${l}`) : ["- nothing recorded yet"]));
+    lines.push("");
+    lines.push("Memory is for what a future session cannot read off the repository and would otherwise learn the hard way again. Check each note against the repository: read what it names, run read-only commands when that settles it. Remove a note that is wrong, that duplicates another, or that the repository's own files or instruction files now state (`forget_note`). Merge overlapping notes into one with evidence (`remember` the merged note, then `forget_note` the parts). Add evidence to a note that has none when you can verify it. A recurring failure above deserves a note only when its cause is a project fact the profile does not show. Keep the set small: a note earns its place only if a future session would act differently because of it. Do not change any file in the repository and do not fix the failures listed. End with a short summary of what you kept, changed and removed, and why.");
+    return lines.join("\n");
+  }
+
   // ------------------------------------------------------------------ /profile
-  const SUBS = ["show", "refresh", "doctor", "set", "note", "notes", "tests", "build", "verify", "forget", "config", "path", "help"];
+  const SUBS = ["show", "refresh", "doctor", "set", "note", "notes", "tests", "build", "verify", "history", "dream", "storage", "forget", "config", "path", "help"];
+  const USAGE = "usage: /profile [show|refresh|doctor|set <key> <cmd|-|default>|note <text>|notes [rm <id|n>|clear]|tests allow|deny|ask|build allow|deny|ask|verify on|off|history|dream|storage [prune]|forget|config|path]";
   pi.registerCommand("profile", {
-    description: "Project profile: /profile [show|refresh|doctor|set <key> <cmd|->|note <text>|notes clear|tests allow|deny|ask|build allow|deny|ask|verify on|off|forget|config|path]",
+    description: "Project profile: /profile [show|refresh|doctor|set <key> <cmd|-|default>|note <text>|notes [rm <id>|clear]|tests allow|deny|ask|build allow|deny|ask|verify on|off|history|dream|storage|forget|config|path]",
     getArgumentCompletions: (prefix) => SUBS.filter((x) => x.startsWith(prefix)).map((x) => ({ value: x, label: x })),
     handler: async (args, ctx) => {
       if (!s) return;
@@ -1034,7 +1255,7 @@ export default function projectProfile(pi: ExtensionAPI) {
         case "show": {
           const stored = requireStored();
           if (!stored) return;
-          showReport(renderReport(stored, st.config, { verifyEnabled: verifyEnabled(), cachePath: profilePath(dir, st.root), brokenChecks: st.broken, lastVerdict: st.lastVerdict }));
+          showReport(renderReport(stored, st.config, { verifyEnabled: verifyEnabled(), cachePath: profilePath(dir, st.root), brokenChecks: st.broken, lastVerdict: st.lastVerdict, stale: st.stale }));
           return;
         }
         case "doctor": {
@@ -1049,9 +1270,9 @@ export default function projectProfile(pi: ExtensionAPI) {
           st.profiles.clear();
           st.broken.clear();
           st.notifiedBroken.clear();
-          invalidateSection();
+          sleepPass(ctx, stored, true);
           notify(ctx, `project-profile: re-detected (${stored.detected.languages.join("/") || "unknown"}, ${effectiveChecks(stored).length} checks)`, "info");
-          showReport(renderReport(stored, st.config, { verifyEnabled: verifyEnabled(), cachePath: profilePath(dir, st.root), brokenChecks: st.broken }));
+          showReport(renderReport(stored, st.config, { verifyEnabled: verifyEnabled(), cachePath: profilePath(dir, st.root), brokenChecks: st.broken, stale: st.stale }));
           return;
         }
         case "set": {
@@ -1060,15 +1281,16 @@ export default function projectProfile(pi: ExtensionAPI) {
           const key = rest[0];
           const cmd = restStr.slice(key?.length ?? 0).trim();
           if (!key || !cmd) {
-            notify(ctx, "usage: /profile set <typecheck|lint|format|test|build|dev|…> <command>   (use - to disable)", "warning");
+            notify(ctx, "usage: /profile set <typecheck|lint|format|test|build|dev|…> <command>   (- disables, default removes the override)", "warning");
             return;
           }
           updateUser(dir, stored, (u) => {
-            if (cmd === "-") u.overrides[key] = null;
+            if (cmd === "default") delete u.overrides[key];
+            else if (cmd === "-") u.overrides[key] = null;
             else u.overrides[key] = cmd;
           });
           invalidateSection();
-          notify(ctx, cmd === "-" ? `project-profile: ${key} disabled for this repo` : `project-profile: ${key} = \`${cmd}\` (runs via sh -c from ${tildify(st.root)})`, "info");
+          notify(ctx, cmd === "default" ? `project-profile: ${key} follows detection again` : cmd === "-" ? `project-profile: ${key} disabled for this repo` : `project-profile: ${key} = \`${cmd}\` (runs via sh -c from ${tildify(st.root)})`, "info");
           return;
         }
         case "note": {
@@ -1078,11 +1300,15 @@ export default function projectProfile(pi: ExtensionAPI) {
             notify(ctx, "usage: /profile note <text>", "warning");
             return;
           }
+          let saved = "";
           updateUser(dir, stored, (u) => {
-            u.notes.push(restStr);
+            const n = makeNote(u.notes, "user", restStr);
+            u.notes.push(n);
+            saved = n.id;
+            record({ kind: "note", action: "add", by: "user", id: n.id, text: n.text.slice(0, 80) });
           });
           invalidateSection();
-          notify(ctx, `project-profile: note saved (${stored.user.notes.length} total)`, "info");
+          notify(ctx, `project-profile: note [${saved}] saved (${stored.user.notes.length} total)`, "info");
           return;
         }
         case "notes": {
@@ -1090,11 +1316,34 @@ export default function projectProfile(pi: ExtensionAPI) {
           if (!stored) return;
           if (rest[0] === "clear") {
             updateUser(dir, stored, (u) => {
+              for (const n of u.notes) record({ kind: "note", action: "remove", by: "user", id: n.id, text: n.text.slice(0, 80) });
               u.notes = [];
             });
+            st.stale.clear();
             invalidateSection();
             notify(ctx, "project-profile: notes cleared", "info");
-          } else notify(ctx, stored.user.notes.length ? stored.user.notes.map((n, i) => `${i + 1}. ${n}`).join("\n") : "no notes", "info");
+            return;
+          }
+          if (rest[0] === "rm") {
+            const target = rest[1] ? findNote(stored.user.notes, rest[1]) : undefined;
+            if (!target) {
+              notify(ctx, rest[1] ? `project-profile: no note ${rest[1]} (\`/profile notes\` lists ids)` : "usage: /profile notes rm <id|n>", "warning");
+              return;
+            }
+            updateUser(dir, stored, (u) => {
+              u.notes = u.notes.filter((n) => n.id !== target.id);
+            });
+            record({ kind: "note", action: "remove", by: "user", id: target.id, text: target.text.slice(0, 80) });
+            st.stale.delete(target.id);
+            invalidateSection();
+            notify(ctx, `project-profile: removed note [${target.id}] “${target.text.length > 60 ? target.text.slice(0, 57) + "…" : target.text}”`, "info");
+            return;
+          }
+          if (stored.user.notes.length === 0) {
+            notify(ctx, "no notes — /profile note <text> adds one", "info");
+            return;
+          }
+          showReport([`# Notes for ${stored.detected.name ?? basename(st.root)}`, "", ...listNotes(stored.user.notes, st.stale), "", "`/profile notes rm <id|n>` removes one · `/profile notes clear` removes all"].join("\n"));
           return;
         }
         case "tests":
@@ -1131,13 +1380,24 @@ export default function projectProfile(pi: ExtensionAPI) {
           notify(ctx, `project-profile: verify ${v} for this repo`, "info");
           return;
         }
+        case "storage": {
+          if (rest[0] === "prune") {
+            const removed = pruneStorage(dir);
+            pruneLogs();
+            notify(ctx, removed.length ? `project-profile: removed ${removed.length} file${removed.length === 1 ? "" : "s"}: ${removed.map((p) => basename(p)).slice(0, 6).join(", ")}${removed.length > 6 ? ", …" : ""}` : "project-profile: nothing to prune", "info");
+          }
+          showReport(renderStorage(storageReport(dir, st.stored ? st.root : undefined, logDir()), dir));
+          return;
+        }
         case "forget": {
-          const ok = deleteStored(dir, st.root);
+          const ok = forgetRepo(dir, st.root).length > 0;
+          st.lastDiag.clear();
+          st.diagMeta.clear();
           st.stored = undefined;
           const { stored } = loadOrDetect(dir, st.root, st.config, st.gitRoot, true);
           st.stored = stored;
-          invalidateSection();
-          notify(ctx, ok ? "project-profile: cache and user data removed; re-detected fresh" : "project-profile: nothing cached; re-detected", "info");
+          sleepPass(ctx, stored, false);
+          notify(ctx, ok ? "project-profile: profile, notes, history and baseline removed; re-detected fresh" : "project-profile: nothing cached; re-detected", "info");
           return;
         }
         case "config": {
@@ -1152,12 +1412,43 @@ export default function projectProfile(pi: ExtensionAPI) {
           }
           return;
         }
+        case "dream": {
+          const stored = requireStored();
+          if (!stored) return;
+          if (!st.config.profile.agentNotes || !bootConfig.profile.agentNotes) {
+            notify(ctx, "project-profile: dreaming needs the agent's note tools — set profile.agentNotes to true in config.json and restart", "warning");
+            return;
+          }
+          if (stored.user.notes.length === 0 && readHistory(dir, st.root).length === 0) {
+            notify(ctx, "project-profile: nothing to dream about yet — no notes and no verification history for this repository", "info");
+            return;
+          }
+          record({ kind: "dream" });
+          st.dreaming = true;
+          pi.sendMessage({ customType: DREAM_MSG, content: dreamMessage(stored), display: true, details: { kind: "dream", headline: "dream: consolidate notes" } }, { triggerTurn: true });
+          notify(ctx, "project-profile: dreaming — the agent checks the notes against the repository and the verification history", "info");
+          return;
+        }
+        case "history": {
+          const stored = requireStored();
+          if (!stored) return;
+          const events = readHistory(dir, st.root);
+          const p = historyPath(dir, st.root);
+          let bytes = 0;
+          try {
+            bytes = statSync(p).size;
+          } catch {
+            /* no file yet */
+          }
+          showReport(renderHistory(stored.detected.name ?? basename(st.root), summarizeHistory(events), { path: p, bytes, events: events.length }));
+          return;
+        }
         case "path": {
-          notify(ctx, `root ${tildify(st.root)}${st.gitRoot ? ` · git ${tildify(st.gitRoot)}` : ""} · cache ${tildify(profilePath(dir, st.root))} · config ${tildify(configPath(dir))}`, "info");
+          notify(ctx, `root ${tildify(st.root)}${st.gitRoot ? ` · git ${tildify(st.gitRoot)}` : ""} · cache ${tildify(profilePath(dir, st.root))} · history ${tildify(historyPath(dir, st.root))} · config ${tildify(configPath(dir))}`, "info");
           return;
         }
         default:
-          notify(ctx, "usage: /profile [show|refresh|doctor|set <key> <cmd|->|note <text>|notes clear|tests allow|deny|ask|build allow|deny|ask|verify on|off|forget|config|path]", "info");
+          notify(ctx, USAGE, "info");
       }
     },
   });

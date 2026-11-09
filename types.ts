@@ -132,10 +132,27 @@ export interface DetectedProfile {
   fingerprint: Record<string, string>;
 }
 
+/**
+ * A per-repository note: what the user or the agent worked out about the project and that its
+ * files do not show (a command that must run first, an env var tests need, a convention no check
+ * enforces). The detected profile is re-read every session; a note persists until it is removed,
+ * so it carries who wrote it, when, and how they knew.
+ */
+export interface Note {
+  /** Short stable id (six hex chars) used by `/profile notes rm` and the `forget_note` tool. */
+  id: string;
+  text: string;
+  by: "user" | "agent";
+  /** ISO date (YYYY-MM-DD); unknown for notes written before ids existed. */
+  at?: string;
+  /** How the author knows the note is true. */
+  evidence?: string;
+}
+
 export interface UserData {
   /** command key → command string, or null to disable. */
   overrides: Record<string, string | null>;
-  notes: string[];
+  notes: Note[];
   permissions: { tests?: "allow" | "deny"; build?: "allow" | "deny" };
   /** Per-repo verify switch (undefined = global default). */
   verify?: boolean;
@@ -173,6 +190,12 @@ export interface ProfileConfig {
     guard: boolean;
     /** Checks run concurrently within the syntax/fast/lint tiers (0 = auto: half the cores, max 4). Tests and builds always run one at a time. */
     concurrency: number;
+    /**
+     * Keep the pre-existing-failure baseline across sessions (under ~/.pi/agent/project-profile/baselines/), keyed by
+     * the tree state (HEAD, dirty files, manifests, installed dependencies). A session on an unchanged tree starts
+     * with the baseline instead of running the project-wide typecheck and lint in the background first.
+     */
+    baselineCache: boolean;
   };
   profile: {
     inject: boolean;
@@ -182,6 +205,10 @@ export interface ProfileConfig {
     inlineInstructionFiles: boolean;
     /** Deliver nested AGENTS.md/CLAUDE.md and glob-scoped rules (.cursor/rules, .github/instructions, .windsurf/rules) when the agent first touches a file they apply to. */
     scopedInstructions: boolean;
+    /** Give the agent the `remember` and `forget_note` tools and `/profile dream`; off = notes are written by the user only (`/profile note`). */
+    agentNotes: boolean;
+    /** Characters of notes shown in the prompt section; the rest is referenced by path. */
+    maxNotesChars: number;
   };
   ignoreDirs: string[];
 }
@@ -201,6 +228,7 @@ export const DEFAULT_CONFIG: ProfileConfig = {
     perTurn: false,
     guard: true,
     concurrency: 0,
+    baselineCache: true,
   },
   profile: {
     inject: true,
@@ -208,6 +236,8 @@ export const DEFAULT_CONFIG: ProfileConfig = {
     maxInstructionTotalChars: 6000,
     inlineInstructionFiles: true,
     scopedInstructions: true,
+    agentNotes: true,
+    maxNotesChars: 1200,
   },
   ignoreDirs: [
     ".git",

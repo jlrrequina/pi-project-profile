@@ -7,6 +7,8 @@
  *     not newer, and releasing moves exactly the Unreleased notes.
  *   - baseline: a failure that existed before the task is never charged to the
  *     agent — whatever line numbers, timings, line endings or output order do.
+ *   - baseline cache: the tree fingerprint changes whenever any input the
+ *     diagnostics depend on changes, so a stale baseline is never restored.
  *   - findings: a detected secret is reported without echoing its value.
  *   - render: the prompt section depends only on what the model should see,
  *     never on volatile fields or on the order/format of π's loaded-file list.
@@ -23,6 +25,7 @@ import { releaseChangelog, sectionBody } from "../scripts/changelog.ts";
 import { compareVersions, nextVersion, parseVersion, planRelease } from "../scripts/release.ts";
 import { DEFAULT_CONFIG, type Check, type DetectedProfile, type StoredProfile, type Tier } from "../types.ts";
 import { analyzeDiagnostics, diagCount, normalizeDiag, splitByBaseline, type DiagSet } from "../verify/baseline.ts";
+import { treeFingerprint, type FingerprintInput } from "../verify/baseline-cache.ts";
 import { collectFindings, formatFinding, mustFix } from "../verify/findings.ts";
 
 // ---------------------------------------------------------------- versions (scripts/release.ts)
@@ -239,6 +242,41 @@ test("baseline: output without recognisable diagnostics is one fingerprint — t
       assert.equal(a.keys.size, 1);
       assert.ok([...a.keys.keys()][0]!.startsWith("tail:"));
       assert.equal(diagCount(splitByBaseline(analyzeDiagnostics(text), a.keys).newKeys), 0);
+    }),
+  );
+});
+
+// ---------------------------------------------------------------- baseline cache (verify/baseline-cache.ts)
+const hex = fc.string({ unit: fc.constantFrom(..."0123456789abcdef".split("")), minLength: 40, maxLength: 40 });
+const stamp = fc.tuple(fc.nat(), fc.nat()).map(([m, s]) => `${m}:${s}`);
+const relPath = fc.array(fc.stringMatching(/^[a-z][a-z0-9]{0,6}$/), { minLength: 1, maxLength: 3 }).map((p) => p.join("/"));
+const snapshot = fc.dictionary(relPath, fc.tuple(fc.constantFrom(" M", "??", "A ", "D "), stamp).map(([st, s]) => `${st}|${s}`), { maxKeys: 6 }).map((d) => new Map(Object.entries(d)));
+const fingerprintInput: fc.Arbitrary<FingerprintInput> = fc.record({ head: hex, snapshot, manifests: fc.dictionary(relPath, stamp, { maxKeys: 4 }), dirs: fc.constant(["/p"]) });
+
+test("baseline cache: the fingerprint is a function of its inputs, and any change to HEAD, a dirty file's content or a manifest changes it", () => {
+  fc.assert(
+    fc.property(fingerprintInput, hex, stamp, (input, otherHead, otherStamp) => {
+      const fp = treeFingerprint(input)!;
+      assert.ok(fp, "known tree state → a fingerprint");
+      assert.equal(treeFingerprint({ ...input, snapshot: new Map(input.snapshot!), manifests: { ...input.manifests } }), fp, "deterministic");
+      assert.equal(treeFingerprint({ ...input, snapshot: new Map(Array.from(input.snapshot!.entries()).reverse()) }), fp, "order of the status output does not matter");
+      fc.pre(otherHead !== input.head);
+      assert.notEqual(treeFingerprint({ ...input, head: otherHead }), fp, "a new commit");
+      for (const [rel, v] of input.snapshot!) {
+        fc.pre(!v.endsWith(`|${otherStamp}`));
+        const changed = new Map(input.snapshot!);
+        changed.set(rel, `${v.slice(0, 2)}|${otherStamp}`);
+        assert.notEqual(treeFingerprint({ ...input, snapshot: changed }), fp, `dirty file ${rel} edited`);
+        const gone = new Map(input.snapshot!);
+        gone.delete(rel);
+        assert.notEqual(treeFingerprint({ ...input, snapshot: gone }), fp, `dirty file ${rel} reverted or committed`);
+      }
+      for (const [rel, v] of Object.entries(input.manifests)) {
+        fc.pre(v !== otherStamp);
+        assert.notEqual(treeFingerprint({ ...input, manifests: { ...input.manifests, [rel]: otherStamp } }), fp, `manifest ${rel} changed`);
+      }
+      assert.equal(treeFingerprint({ ...input, head: undefined }), undefined, "no HEAD → nothing to cache");
+      assert.equal(treeFingerprint({ ...input, snapshot: undefined }), undefined, "no status → nothing to cache");
     }),
   );
 });

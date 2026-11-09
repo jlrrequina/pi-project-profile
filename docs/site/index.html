@@ -157,8 +157,9 @@
       <li><strong>Verify</strong> — after every turn that changed files, runs the project's own checks by tier (syntax → typecheck → lint automatically; tests and build once you allow them per repository) and sends only <em>new</em> failures back to the agent for at most three repair rounds.</li>
       <li><strong>Review</strong> — flags what a reviewer would want to know about the agent's diff: added suppressions, skipped or focused tests, stubs, loosened configs, deleted tests, secrets, unignored <code>.env</code> files, stale lockfiles.</li>
       <li><strong>Rules on demand</strong> — delivers nested <code>AGENTS.md</code> files and glob-scoped rules (Cursor, Copilot, Windsurf) when the agent first touches a file they apply to, and warns before hand-editing generated files.</li>
+      <li><strong>Memory</strong> — per-repository notes with author, date and evidence: the agent records what the files do not show with a <code>remember</code> tool, a sleep pass validates the notes against the repository at every session start, <code>/profile dream</code> has the agent consolidate them against the verification history, and the pre-existing-failure baseline survives between sessions on an unchanged tree.</li>
     </ul>
-    <p>Installs, migrations, deploys and anything network-bound are never run. Cache and settings live under <code>~/.pi/agent/project-profile/</code>. Requires π ≥ 0.87 and Node ≥ 22.18; no runtime dependencies; MIT.</p>
+    <p>Installs, migrations, deploys and anything network-bound are never run. Cache, notes, history and settings live under <code>~/.pi/agent/project-profile/</code>, size-bounded and pruned (<code>/profile storage</code>). Requires π ≥ 0.87 and Node ≥ 22.18; no runtime dependencies; MIT.</p>
   </section>
 
   <section id="example">
@@ -200,10 +201,13 @@
       <tbody>
         <tr><td><code>/profile</code></td><td>show the profile, checks, availability and cache path</td></tr>
         <tr><td><code>/profile doctor</code></td><td>required vs installed runtimes, tool and dependency availability, fix commands (never run)</td></tr>
-        <tr><td><code>/profile set &lt;key&gt; &lt;cmd&gt;</code></td><td>override <code>typecheck</code>, <code>lint</code>, <code>test</code>, <code>build</code>, … (<code>-</code> disables)</td></tr>
+        <tr><td><code>/profile set &lt;key&gt; &lt;cmd&gt;</code></td><td>override <code>typecheck</code>, <code>lint</code>, <code>test</code>, <code>build</code>, … (<code>-</code> disables, <code>default</code> removes the override)</td></tr>
         <tr><td><code>/profile tests allow|deny|ask</code></td><td>test-tier permission (same for <code>build</code>)</td></tr>
+        <tr><td><code>/profile note</code> · <code>/profile notes [rm &lt;id&gt;]</code></td><td>per-repo notes for the agent: add, list with ids, remove one</td></tr>
+        <tr><td><code>/profile history</code> · <code>/profile dream</code> · <code>/profile storage</code></td><td>what the gate observed in this repo; let the agent consolidate the notes; sizes and pruning of everything stored</td></tr>
         <tr><td><code>/verify [fast|lint|test|build|all] [file…]</code></td><td>run checks now, showing every failure</td></tr>
         <tr><td><code>run_checks</code></td><td>the same, as a tool the model can call mid-task</td></tr>
+        <tr><td><code>remember</code> · <code>forget_note</code></td><td>tools the model calls to save a project note with its evidence, or remove one of its own</td></tr>
       </tbody>
     </table>
     <p>The package also ships an <a href="https://agentskills.io">Agent Skill</a> (<code>/skill:project-profile</code>) that the model loads on demand to interpret verification messages and explain configuration. Full reference: <a href="https://github.com/jlrrequina/pi-project-profile#readme">README</a>.</p>

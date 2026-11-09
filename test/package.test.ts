@@ -51,9 +51,12 @@ test("skill: Agent Skills frontmatter is valid and the name matches its director
   assert.ok(src.split("\n").length <= 500, "SKILL.md under 500 lines");
   // Everything the skill teaches must exist in the extension.
   const index = read("index.ts");
-  for (const cmd of ["show", "refresh", "doctor", "set", "note", "notes", "tests", "build", "verify", "forget", "config", "path"]) assert.ok(src.includes(`/profile ${cmd}`) || cmd === "show", `skill documents /profile ${cmd}`);
-  assert.ok(index.includes('name: "run_checks"') && src.includes("run_checks"));
-  for (const key of ["maxRepairRounds", "runTests", "runBuild", "guard", "perTurn", "headless", "concurrency", "scopedInstructions", "maxInstructionFileChars"]) {
+  for (const cmd of ["show", "refresh", "doctor", "set", "note", "notes", "tests", "build", "verify", "history", "dream", "storage", "forget", "config", "path"]) assert.ok(src.includes(`/profile ${cmd}`) || cmd === "show", `skill documents /profile ${cmd}`);
+  // every subcommand the extension accepts is one the skill documents, and the other way round
+  const subs = index.match(/const SUBS = \[([^\]]+)\]/)![1]!.match(/"(\w+)"/g)!.map((s) => s.replace(/"/g, ""));
+  for (const sub of subs) assert.ok(sub === "show" || sub === "help" || src.includes(`/profile ${sub}`), `skill documents /profile ${sub}`);
+  for (const tool of ["run_checks", "remember", "forget_note"]) assert.ok(index.includes(`name: "${tool}"`) && src.includes(`\`${tool}\``), `skill documents the ${tool} tool`);
+  for (const key of ["maxRepairRounds", "runTests", "runBuild", "guard", "perTurn", "headless", "concurrency", "baselineCache", "scopedInstructions", "maxInstructionFileChars", "agentNotes", "maxNotesChars"]) {
     assert.ok(src.includes(key), `skill documents config key ${key}`);
     assert.ok(read("types.ts").includes(key), `config key ${key} exists`);
   }

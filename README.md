@@ -19,8 +19,9 @@ pi install npm:@lenard9191/pi-project-profile
 - **Verify**: after every turn that changed files, runs the project's *own* checks and sends new failures back to the agent for a bounded number of repair rounds.
 - **Review**: flags what a reviewer would want to know about the agent's diff: added suppressions, skipped or focused tests, stubs, loosened configs, deleted tests, secrets, unignored `.env` files, stale lockfiles.
 - **Rules on demand**: delivers nested `AGENTS.md` files and glob-scoped rules (Cursor, Copilot, Windsurf) when the agent first touches a file they apply to, and warns before hand-editing generated files.
+- **Memory**: per-repository notes with author, date and evidence — what the agent or you worked out and the files do not show. The agent records them with a `remember` tool, a sleep pass validates them against the repository at every session start, `/profile dream` has the agent consolidate them against the verification history, and the pre-existing-failure baseline survives between sessions on an unchanged tree.
 
-It never writes into the repository. Cache and settings live under `~/.pi/agent/project-profile/`.
+It never writes into the repository. Cache, notes, history and settings live under `~/.pi/agent/project-profile/` (`/profile storage` shows and prunes them).
 
 ## Why
 
@@ -28,9 +29,9 @@ A coding agent dropped into an unfamiliar repository guesses: which package mana
 
 ## How it works
 
-1. **Session start** — the repository is scanned (manifests, lockfiles, CI files, Makefiles, instruction files; nothing is executed), cached under `~/.pi/agent/project-profile/`, and rendered as `<project_profile>` in the system prompt. Re-detection happens automatically when a manifest changes.
-2. **Each turn** — files the agent touches are tracked; nested `AGENTS.md`/`CLAUDE.md` and glob-scoped rules that apply to them are delivered with the first matching tool result; generated files get a warning. The agent's first read in a project directory starts that project's typecheck and lint once, in the background, on the untouched tree: whatever already fails there is the baseline, so it is never blamed on the agent (a run that finishes after the agent's first write is discarded).
-3. **Before the turn settles** — if files changed, the syntax, typecheck and lint tiers run (tests and builds once you have allowed them for the repo). New failures go back to the agent as a `[verification]` message for at most three repair rounds; pre-existing failures are reported to you once and never blamed on the agent. The diff review runs alongside.
+1. **Session start** — the repository is scanned (manifests, lockfiles, CI files, Makefiles, instruction files; nothing is executed), cached under `~/.pi/agent/project-profile/`, and rendered as `<project_profile>` in the system prompt. Re-detection happens automatically when a manifest changes. The notes of the repository are validated against it (a note that names a path that no longer exists is flagged), and the last session's pre-existing-failure baseline is restored when the tree has not changed since.
+2. **Each turn** — files the agent touches are tracked; nested `AGENTS.md`/`CLAUDE.md` and glob-scoped rules that apply to them are delivered with the first matching tool result; generated files get a warning. Without a restored baseline, the agent's first read in a project directory starts that project's typecheck and lint once, in the background, on the untouched tree: whatever already fails there is the baseline, so it is never blamed on the agent (a run that finishes after the agent's first write is discarded).
+3. **Before the turn settles** — if files changed, the syntax, typecheck and lint tiers run (tests and builds once you have allowed them for the repo). New failures go back to the agent as a `[verification]` message for at most three repair rounds; pre-existing failures are reported to you once and never blamed on the agent. The diff review runs alongside. Each verdict is appended to the repository's gate history (dates, checks, rounds — never code or output).
 
 ## Install
 
@@ -52,6 +53,7 @@ The package ships one extension and one [Agent Skill](https://agentskills.io) (`
 - Conventions: ESM · Prettier · Biome · Husky git hooks · License: MIT
 - Tests: `*.test.ts` in tests/ (202)
 - Instruction files: AGENTS.md (loaded) · .cursorrules (22 KB — read it when relevant)
+- Notes: (user 3f9a1c) `pnpm test` needs Docker running for the Postgres container · (agent 8b02e4) Run `pnpm codegen` before the typecheck after a schema change — evidence: tsc failed on missing generated types until I ran it
 - Verification: after each turn that changed files, the harness runs `pnpm exec tsc --noEmit -p tsconfig.json`, `pnpm run lint:check` automatically; asks once before running tests
 </project_profile>
 ```
@@ -91,6 +93,20 @@ Compared with the content before the agent's first write (or git `HEAD`; files t
 
 In JS and TS files, a suppression counts only as a directive that opens a comment and a focus or skip marker only in code, so test titles and fixture strings that mention them are not reported. Files in `ignoreDirs` (`node_modules`, build output) are not reviewed. Secrets, stale lockfiles and `.only` get one follow-up turn. Weakening that can hide a check that failed in this task also gets one follow-up turn: a `@ts-ignore` while the typecheck fails, a `.skip` while tests fail, but not an `eslint-disable` while tests fail. Everything else is shown to you.
 
+## Memory
+
+The detected profile needs no memory: it is re-read from the repository every session. Memory is for what the files do not show and that cost effort to learn — a command that must run before another, an environment variable the tests need, a convention no check enforces. The design follows [Anthropic's components of agent memory](https://www.anthropic.com/research/components-of-agent-memory): a small injected layer, notes that carry how they were verified, and a sleep phase that checks memory against ground truth.
+
+- **Notes** live per repository under `~/.pi/agent/project-profile/`, never in the repository, and appear under `Notes:` in `<project_profile>` with their author and id: `(user 3f9a1c) …`, `(agent 8b02e4) … — evidence: …`. You write them with `/profile note <text>`; the agent writes them with the `remember` tool (text plus evidence: how it knows), at most 25 agent notes per repository, and you are told each time. `forget_note` lets the agent drop a note of its own that proved wrong; your notes it can remove only during a dream. `/profile notes` lists them with ids and dates, `/profile notes rm <id|n>` removes one.
+- **The injected layer stays small.** Notes are shown within `profile.maxNotesChars` (1200); the rest is counted and referenced by path instead of silently dropped.
+- **The learning loop.** When a repair round turns green, the repair message has already asked the agent to save the cause as a note *if* it was a project fact the profile did not show — with the evidence — and to skip it when the cause was its own change. Purpose, not a rule: what to record is the agent's judgment.
+- **Sleep pass** (deterministic, every session start and `/profile refresh`): a note that names a path that no longer exists is flagged `[may be stale: …]` in the prompt and to you; a command override that detection now reproduces is reported with `/profile set <key> default` to drop it. Nothing is removed without you.
+- **`/profile dream`**: sends the agent the notes, the overrides and the verification history with one instruction — check each note against the repository, remove what is wrong or duplicated, merge, add evidence, keep the set small, change no file — and lets it remove your notes too for that run. It ends with a summary of what it kept, changed and removed.
+- **History** (`/profile history`): every verdict, repair round, environment failure, review finding and note change is one JSON line per repository (dates, labels and counts only). The report shows first-attempt failures per check with the auto-fix that was offered, environment failures by session, pre-existing failures, and patterns such as "lint failed on the first attempt in 6 of 14 tasks" — the review that used to need a read of every session transcript.
+- **Persisted baseline** (`verify.baselineCache`): the pre-existing-failure baseline is kept with a fingerprint of the tree (HEAD, every dirty file's content stamp, manifests, installed-dependency markers) for three days. A session that starts on the same tree knows what already failed before the agent's first write, without the background run and its race. Any change to the fingerprint, or no git, means no cache.
+
+All of it is bounded: history files rewrite themselves past 256 KB, a baseline past 2 MB or 5000 diagnostics per check is not written, and pruning at session start drops files of repositories whose root is gone (profiles with notes or overrides are kept: an unmounted disk is not a deleted project), baselines past their life, and profiles not visited for 120 days. `/profile storage` shows every directory with its size; `/profile storage prune` runs the pruning now; `/profile forget` drops one repository's profile, notes, history and baseline.
+
 ## Commands and tool
 
 | | |
@@ -98,13 +114,17 @@ In JS and TS files, a suppression counts only as a directive that opens a commen
 | `/profile` | show the profile, checks, availability and cache path |
 | `/profile doctor` | required vs installed runtimes, tool and dependency availability, fix commands (never run) |
 | `/profile refresh` | re-detect (also automatic when a manifest changes) |
-| `/profile set <key> <cmd>` | override `typecheck`, `lint`, `test`, `build`, … (`-` disables) |
-| `/profile note <text>` | persist a per-repo note for the agent (`/profile notes` lists them, `/profile notes clear` drops them) |
+| `/profile set <key> <cmd>` | override `typecheck`, `lint`, `test`, `build`, … (`-` disables, `default` removes the override) |
+| `/profile note <text>` | persist a per-repo note for the agent (`/profile notes` lists them with ids, `/profile notes rm <id\|n>` removes one, `/profile notes clear` drops them all) |
 | `/profile tests allow\|deny\|ask` | test-tier permission (same for `build`) |
 | `/profile verify on\|off` | per-repo switch for the gate |
-| `/profile forget` | drop cache and user data for this repo |
+| `/profile history` | what the gate observed in this repo: tasks, first-attempt failures per check, environment failures, review findings, patterns |
+| `/profile dream` | the agent consolidates the notes against the repository and the history (needs `profile.agentNotes`) |
+| `/profile storage [prune]` | sizes of everything the extension stores, and pruning on demand |
+| `/profile forget` | drop the profile, notes, history and baseline for this repo |
 | `/verify [fast\|lint\|test\|build\|all] [file…]` | run checks now, showing every failure (`/verify cancel` aborts) |
 | `run_checks` | the same, as a tool the model can call mid-task; at an umbrella directory without a manifest it runs the single nested project, or names the nested projects when there are several |
+| `remember` / `forget_note` | tools the model calls to save a project note (text + evidence) or remove one of its own; off with `profile.agentNotes: false` |
 
 ## Configuration
 
@@ -112,10 +132,12 @@ In JS and TS files, a suppression counts only as a directive that opens a commen
 
 ```jsonc
 {
-  "verify": { "enabled": true, "maxRepairRounds": 3, "runTests": "ask", "runBuild": "ask", "guard": true, "perTurn": false, "concurrency": 0 },
-  "profile": { "inject": true, "scopedInstructions": true, "maxInstructionFileChars": 3000 }
+  "verify": { "enabled": true, "maxRepairRounds": 3, "runTests": "ask", "runBuild": "ask", "guard": true, "perTurn": false, "concurrency": 0, "baselineCache": true },
+  "profile": { "inject": true, "scopedInstructions": true, "maxInstructionFileChars": 3000, "agentNotes": true, "maxNotesChars": 1200 }
 }
 ```
+
+`profile.agentNotes: false` removes the `remember`/`forget_note` tools and `/profile dream`; notes are then yours alone (`/profile note`). `verify.baselineCache: false` runs the background baseline every session instead of restoring it.
 
 `verify.perTurn` also runs the syntax + fast tiers after every turn that changed files and adds a short informational note when red (no repair loop: multi-file edits are legitimately red half-way). `PI_PROJECT_PROFILE_DEBUG=1` writes a JSONL trace to `$TMPDIR/pi-project-profile/`.
 
@@ -140,7 +162,11 @@ It is an extension for the π coding agent only. It does read the instruction fi
 
 ### Does it change anything in my repository?
 
-No. Detection is read-only, the cache and per-repo settings live under `~/.pi/agent/project-profile/`, logs under `$TMPDIR/pi-project-profile/`. The automatic checks are the project's own read-only commands; auto-fix commands are suggested, never run.
+No. Detection is read-only, the cache, notes, history, baselines and per-repo settings live under `~/.pi/agent/project-profile/`, logs under `$TMPDIR/pi-project-profile/`. The automatic checks are the project's own read-only commands; auto-fix commands are suggested, never run. `/profile storage` shows what is stored and prunes it.
+
+### Can the agent write to its own memory? Can I stop it?
+
+Yes, with the `remember` tool: a note with the evidence for it, at most 25 per repository, each announced to you and removable with `/profile notes rm <id>`. The agent cannot remove your notes except during a `/profile dream` you start. `profile.agentNotes: false` in `config.json` removes the tools; notes are then written only with `/profile note`.
 
 ### Will it run my tests or builds automatically?
 
