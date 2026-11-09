@@ -71,7 +71,7 @@ async function load(agent = tmp()) {
   };
   const cleanup = () => {
     delete process.env.PI_CODING_AGENT_DIR;
-    rmSync(agent, { recursive: true, force: true });
+    rmSync(agent, { recursive: true, force: true, maxRetries: 3, retryDelay: 100 }); // Windows: a just-closed file can still deny the delete
   };
   const runChecksResult = async (ctx: any, params: Record<string, unknown> = {}) => impl["run_checks"]!.execute("id", params, undefined, undefined, ctx);
   const runChecks = async (ctx: any, params: Record<string, unknown> = {}) => (await runChecksResult(ctx, params)).content.map((c) => c.text).join("\n");
@@ -336,6 +336,8 @@ test("baseline cache: the next session on the same tree starts with the last bas
   await four.emit("session_start", {}, ctx4);
   await four.emit("before_agent_start", prompt(), ctx4);
   assert.ok(!four.notes.some(([, m]) => m.includes("tree unchanged")));
+  // the cache is off, so a background baseline runs: let it finish before the directories it writes to go away
+  await until(() => four.notes.some(([, m]) => m.includes("untouched tree")));
   four.cleanup();
   rmSync(root, { recursive: true, force: true });
 });
