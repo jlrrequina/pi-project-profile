@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.5.1 — 2026-11-14
+
 - The tool schemas import `Type` from `typebox`, not from `@earendil-works/pi-ai`. Since 1.5.0 the published pi-ai does not export `Type`; π still maps the old import, but only for compatibility. π 0.87.0 and later provide `typebox` to extensions, so the supported π versions do not change. In `peerDependencies`, `typebox` replaces `@earendil-works/pi-ai`.
 
 ## 1.5.0 — 2026-11-09
