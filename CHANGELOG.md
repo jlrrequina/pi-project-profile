@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+- The tool schemas import `Type` from `typebox`, not from `@earendil-works/pi-ai`. Since 1.5.0 the published pi-ai does not export `Type`; π still maps the old import, but only for compatibility. π 0.87.0 and later provide `typebox` to extensions, so the supported π versions do not change. In `peerDependencies`, `typebox` replaces `@earendil-works/pi-ai`.
+
 ## 1.5.0 — 2026-11-09
 
 Memory, after [Anthropic's components of agent memory](https://www.anthropic.com/research/components-of-agent-memory): a small injected layer of notes that carry how they were verified, a channel for the agent to write them, and a sleep phase that checks memory against ground truth. Nothing here calls a model on its own, and nothing is written into the repository.

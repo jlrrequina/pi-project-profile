@@ -5,7 +5,7 @@ A π (pi-coding-agent) extension package. `README.md` is the user-facing referen
 ## Hard constraints — do not regress
 
 - **Erasable TypeScript only.** π loads `.ts` directly (Node type stripping / jiti): no `enum`, `namespace`, parameter properties, or decorators. Use `import type`, explicit `.ts` import extensions, `"type": "module"`. `tsc` enforces `erasableSyntaxOnly` and `verbatimModuleSyntax`.
-- **No runtime dependencies.** Import only from `node:*`, `@earendil-works/pi-coding-agent`, `@earendil-works/pi-ai` (`Type`), `@earendil-works/pi-tui` (`Box`/`Text`/`Markdown`).
+- **No runtime dependencies.** Import only from `node:*`, `@earendil-works/pi-coding-agent`, `typebox` (`Type`; the published pi-ai no longer exports it), `@earendil-works/pi-tui` (`Box`/`Text`/`Markdown`).
 - **The prompt section must be deterministic per session** (no timestamps, branch names, or ordering that depends on iteration order) so prompt caching keeps working.
 - **Never write into the target repository.** All state goes under `~/.pi/agent/project-profile/` or `$TMPDIR/pi-project-profile/`.
 - **Never auto-run installs, migrations, deploys, or anything network-bound.** Tests and builds are confirm-once tiers (`TIER_POLICY` in `types.ts`). When unsure, fail to a no-op — never to a wrong action.
