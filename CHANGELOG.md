@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 1.5.2 — 2026-11-22
+
 - Tested with π 1.5.2. The tests now run on `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` 1.5.2 (1.5.1 was tested on 1.5.0) and pass. The supported π versions do not change. The extension code did not change.
 
 ## 1.5.1 — 2026-11-14
