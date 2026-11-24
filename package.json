@@ -91,7 +91,7 @@
     "@earendil-works/pi-tui": "1.5.2",
     "@types/node": "^24.19.0",
     "fast-check": "4.10.2",
-    "typebox": "1.4.6",
+    "typebox": "1.4.7",
     "typescript": "^5.9.3"
   },
   "scripts": {
