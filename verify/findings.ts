@@ -235,6 +235,7 @@ const CASES: Array<[RegExp, RegExp]> = [
   [/\.exs$/i, /^\s*test\s+"/gm],
 ];
 
+const PRIVATE_KEY = /-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----/;
 const SECRETS: Array<[RegExp, string]> = [
   [/\bsk-ant-[A-Za-z0-9_-]{32,}/g, "Anthropic API key"],
   [/\b(?:AKIA|ASIA)[0-9A-Z]{16}\b/g, "AWS access key ID"],
@@ -246,9 +247,26 @@ const SECRETS: Array<[RegExp, string]> = [
   [/\bAIza[0-9A-Za-z_-]{35}\b/g, "Google API key"],
   [/\bnpm_[A-Za-z0-9]{36}\b/g, "npm token"],
   [/\bhf_[A-Za-z0-9]{34,}\b/g, "Hugging Face token"],
-  [/-----BEGIN (?:RSA |EC |OPENSSH |DSA |PGP |ENCRYPTED )?PRIVATE KEY-----/g, "private key"],
+  [new RegExp(PRIVATE_KEY.source, "g"), "private key"],
 ];
 const PLACEHOLDER = /EXAMPLE|x{6,}|X{6,}|0{8,}|1234567890|your[_-]?(api|key|token)|dummy|fake|placeholder|redacted|\*{4,}/i;
+
+/** Text with every token in a known credential format replaced by its kind; placeholders stay. */
+export function redactSecrets(text: string): string {
+  let out = text;
+  for (const [re, what] of SECRETS) out = out.replace(re, (m) => (PLACEHOLDER.test(m) ? m : `[${what} redacted]`));
+  return out;
+}
+
+/** The text holds a private key block: masking the header would leave the key itself. */
+export function holdsPrivateKey(text: string): boolean {
+  return PRIVATE_KEY.test(text);
+}
+
+/** A dotenv file that holds real values (`.env`, `.env.local`), not a template (`.env.example`). */
+export function isEnvFile(name: string): boolean {
+  return /^\.env(\.[\w.-]+)?$/.test(name) && !/\.(example|sample|template|dist|defaults)$/i.test(name);
+}
 const NO_SECRET_SCAN = /(^|\/)(pnpm-lock\.yaml|package-lock\.json|yarn\.lock|bun\.lock|Cargo\.lock|go\.sum|poetry\.lock|uv\.lock|Gemfile\.lock|composer\.lock)$|\.(min\.js|map)$/;
 
 interface LockRule {
@@ -434,7 +452,7 @@ export function collectFindings(input: FindingsInput): Finding[] {
     }
     // .env files that would be committed
     const name = basename(file);
-    if (/^\.env(\.[\w.-]+)?$/.test(name) && !/\.(example|sample|template|dist|defaults)$/i.test(name) && input.ignored?.(abs) === false) add("env-file", file, "environment file is not gitignored (it would be committed)", []);
+    if (isEnvFile(name) && input.ignored?.(abs) === false) add("env-file", file, "environment file is not gitignored (it would be committed)", []);
     // suppressions, skips, focus, stubs
     const pats = CODE_PATTERNS.find(([re]) => re.test(file))?.[1] ?? [];
     const js = JS.test(file);

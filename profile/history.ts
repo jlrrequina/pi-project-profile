@@ -1,7 +1,7 @@
 /**
  * Gate history: a compact per-repository log of what verification observed. It is the
- * "transcript" the sleep phase replays: `/profile history` summarises it for the user and
- * `/profile dream` hands the summary to the agent. One JSON line per event; dates, check labels,
+ * "transcript" the sleep phase replays: `/profile history` summarises it for the user, and a dream
+ * (`/profile dream` or the automatic dream) gets the summary. One JSON line per event; dates, check labels,
  * repair rounds, environment reasons, review kinds and note ids only, never code or check output.
  * The file is bounded and pruned with the profile.
  */
@@ -15,8 +15,10 @@ export type HistoryEvent = { t: string; s: string } & (
   | { kind: "env"; seq: number; reason: string; checks: string[] }
   | { kind: "findings"; seq: number; kinds: string[]; cont: boolean }
   | { kind: "baseline"; dir: string; failed: Array<{ label: string; count: number }> }
-  | { kind: "note"; action: "add" | "remove"; by: "user" | "agent"; id: string; text: string }
-  | { kind: "dream" }
+  // `dream`: the change was made by a dream (no new material for the next one)
+  | { kind: "note"; action: "add" | "remove"; by: "user" | "agent"; id: string; text: string; dream?: true }
+  // `/profile dream` records its start; the automatic dream (`auto`) records its end, after its note changes
+  | { kind: "dream"; auto?: true }
 );
 export type HistoryInput = HistoryEvent extends infer E ? (E extends { t: string; s: string } ? Omit<E, "t" | "s"> : never) : never;
 

@@ -1,19 +1,20 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join, resolve, sep } from "node:path";
+import { basename, join, resolve, sep } from "node:path";
 import { test } from "node:test";
 import { loadConfig } from "../config.ts";
 import { composeServices, parseToolVersions, tomlHasTable, tomlKeys, tomlSections } from "../detect/context.ts";
 import { detectProject, findProjectRoot, nearestProjectDir } from "../detect/index.ts";
-import { clearWhichCache, executableCandidates, expandDirGlob, findNodeBin, stripJsonComments } from "../fs-utils.ts";
+import { clearWhichCache, executableCandidates, expandDirGlob, findNodeBin, stripJsonComments, tryLock, withLockSync } from "../fs-utils.ts";
 import { effectiveChecks, renderPromptSection, renderReport, tierAllowed } from "../profile/render.ts";
 import { emptyUserData, isStale, loadOrDetect, loadStored, profilePath, saveStored, updateUser } from "../profile/store.ts";
 import { duplicateOf, findNote, listNotes, makeNote, migrateNotes, pathTokens, redundantOverrides, renderNotes, validateNotes } from "../profile/memory.ts";
 import { appendHistory, HISTORY_MAX_BYTES, historyForDream, historyPath, readHistory, renderHistory, summarizeHistory, type HistoryEvent } from "../profile/history.ts";
+import { describeDream, DREAM_MAX_STEPS, DREAM_TOOL_BUDGET, dreamDue, dreamRead, dreamSearch, formatUsage, parseChanges, planChanges, runDream, type DreamModel, type DreamReply, type DreamTools } from "../profile/dream.ts";
 import { BASELINE_MAX_AGE_MS, baselinePath, gitHead, loadBaseline, saveBaseline, treeFingerprint } from "../verify/baseline-cache.ts";
 import { forgetRepo, formatSize, PROFILE_MAX_AGE_MS, pruneStorage, renderStorage, storageReport } from "../profile/storage.ts";
-import { checkKey, DEFAULT_CONFIG, type Check, type StoredProfile } from "../types.ts";
+import { checkKey, DEFAULT_CONFIG, type Check, type Note, type StoredProfile } from "../types.ts";
 import { classifyFailure } from "../verify/classify.ts";
 import { buildPlan, isDocOnly, TIER_ORDER, type Plan, type PlannedCheck } from "../verify/plan.ts";
 import { pruneOutput, splitLines, stylishHeader } from "../verify/prune.ts";
@@ -429,8 +430,14 @@ test("storage: pruning removes what nothing can use and keeps profiles that hold
   writeFileSync(join(agent, "project-profile", "profiles", "x.json.123.tmp"), "");
   require_utimes(join(agent, "project-profile", "profiles", "x.json.123.tmp"), new Date(Date.now() - 2 * 3_600_000));
   writeFileSync(join(agent, "project-profile", "profiles", "y.json.456.tmp"), "");
+  // a lock left by a crash (old) and a lock that a dream holds now (fresh)
+  writeFileSync(join(agent, "project-profile", "profiles", "x.dream.lock"), "{}");
+  require_utimes(join(agent, "project-profile", "profiles", "x.dream.lock"), new Date(Date.now() - 2 * 3_600_000));
+  writeFileSync(join(agent, "project-profile", "profiles", "y.dream.lock"), "{}");
   const removed = pruneStorage(agent).map(rel);
-  assert.deepEqual(removed.sort(), [rel(profilePath(agent, goneRoot)), rel(historyPath(agent, goneRoot)), rel(baselinePath(agent, goneRoot)), rel(baselinePath(agent, alive)), "project-profile/history/0123456789abcdef.jsonl", "project-profile/profiles/x.json.123.tmp"].sort(), removed.join("\n"));
+  assert.deepEqual(removed.sort(), [rel(profilePath(agent, goneRoot)), rel(historyPath(agent, goneRoot)), rel(baselinePath(agent, goneRoot)), rel(baselinePath(agent, alive)), "project-profile/history/0123456789abcdef.jsonl", "project-profile/profiles/x.json.123.tmp", "project-profile/profiles/x.dream.lock"].sort(), removed.join("\n"));
+  assert.ok(existsSync(join(agent, "project-profile", "profiles", "y.dream.lock")), "a fresh lock may be held right now");
+  rmSync(join(agent, "project-profile", "profiles", "y.dream.lock"));
   assert.ok(existsSync(profilePath(agent, alive)) && existsSync(historyPath(agent, alive)), "the live repository keeps its files");
   assert.ok(existsSync(profilePath(agent, goneWithNotes)) && existsSync(historyPath(agent, goneWithNotes)), "notes are never pruned for a missing root");
   assert.ok(existsSync(join(agent, "project-profile", "profiles", "y.json.456.tmp")), "a fresh tmp file may belong to a write in progress");
@@ -456,6 +463,52 @@ test("storage: pruning removes what nothing can use and keeps profiles that hold
   rmSync(agent, { recursive: true, force: true });
   rmSync(alive, { recursive: true, force: true });
   rmSync(logs, { recursive: true, force: true });
+});
+
+test("store: two sessions on one repository keep each other's notes (each write starts from the file)", () => {
+  const agent = tmp();
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "x" }));
+  const a = loadOrDetect(agent, root, config, undefined).stored; // session A
+  const b = loadStored(agent, root)!; // session B, started at the same time
+  updateUser(agent, a, (u) => u.notes.push(makeNote(u.notes, "agent", "from session A")));
+  updateUser(agent, b, (u) => u.notes.push(makeNote(u.notes, "user", "from session B")));
+  assert.deepEqual(loadStored(agent, root)!.user.notes.map((n) => n.text), ["from session A", "from session B"]);
+  assert.deepEqual(b.user.notes.map((n) => n.text), ["from session A", "from session B"], "the writer's copy is the file's");
+  assert.ok(!existsSync(`${profilePath(agent, root)}.lock`), "the write lock is released");
+  rmSync(agent, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("locks: one holder at a time; a lock whose process is gone or that is too old is taken over; withLockSync never blocks the write", () => {
+  const dir = tmp();
+  const lock = join(dir, "sub", "x.lock");
+  const release = tryLock(lock, 60_000);
+  assert.ok(release && existsSync(lock));
+  assert.equal(tryLock(lock, 60_000), undefined, "held by a live process");
+  release!();
+  assert.ok(!existsSync(lock));
+  // left behind by a process that exited
+  const { spawnSync } = process.getBuiltinModule("node:child_process") as typeof import("node:child_process");
+  const dead = spawnSync(process.execPath, ["-e", ""]).pid;
+  writeFileSync(lock, JSON.stringify({ pid: dead }));
+  const taken = tryLock(lock, 60_000);
+  assert.ok(taken, "a dead holder's lock is taken over");
+  taken!();
+  // too old, whoever holds it
+  writeFileSync(lock, JSON.stringify({ pid: process.pid }));
+  require_utimes(lock, new Date(Date.now() - 120_000));
+  const old = tryLock(lock, 60_000);
+  assert.ok(old, "an old lock is taken over");
+  // held: withLockSync waits, then writes anyway
+  const t0 = Date.now();
+  assert.equal(withLockSync(lock, () => 42, 100), 42);
+  assert.ok(Date.now() - t0 >= 90, "it waited for the holder first");
+  assert.ok(existsSync(lock), "the holder's lock stays");
+  old!();
+  assert.equal(withLockSync(lock, () => existsSync(lock)), true, "the lock exists while fn runs");
+  assert.ok(!existsSync(lock));
+  rmSync(dir, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------- memory (notes)
@@ -509,6 +562,182 @@ test("notes: the prompt shows notes within a budget and references the rest inst
   const n = makeNote([], "agent", "see `src/gone.ts`", "read it", "2026-01-01");
   assert.deepEqual(renderNotes([n], new Map([[n.id, "`src/gone.ts` does not exist"]]), 1000, undefined), [`(agent ${n.id}) see \`src/gone.ts\` — evidence: read it [may be stale: \`src/gone.ts\` does not exist]`]);
   assert.deepEqual(renderNotes([], new Map(), 1000, undefined), []);
+});
+
+// ---------------------------------------------------------------- the automatic dream
+test("dream gate: an agent note and new material, then many agent notes or enough hours and sessions since the last dream", () => {
+  const now = Date.parse("2026-11-20T12:00:00Z");
+  const ago = (hours: number) => new Date(now - hours * 3_600_000).toISOString();
+  const ev = (hours: number, s: string, e: Record<string, unknown>) => ({ t: ago(hours), s, ...e }) as HistoryEvent;
+  const agent = makeNote([], "agent", "tests need `DATABASE_URL`", "ran it", "2026-11-01");
+  const user = makeNote([agent], "user", "keep the Makefile", undefined, "2026-11-01");
+  const due = (notes: Note[], events: HistoryEvent[], stale = new Map<string, string>()) => dreamDue({ notes, stale, events, session: "now", now });
+  const noteEv = (hours: number, s: string, extra: Record<string, unknown> = {}) => ev(hours, s, { kind: "note", action: "add", by: "agent", id: "abcdef", text: "x", ...extra });
+  const verdict = (hours: number, s: string) => ev(hours, s, { kind: "verdict", seq: 1, status: "green", round: 0, failed: [], known: 0, ms: 1 });
+  assert.deepEqual(due([user], [noteEv(50, "a")]), { due: false, why: "no agent notes" }, "only agent notes are the dream's to change");
+  // never dreamed: everything is material; it waits for three sessions (this one included)
+  assert.deepEqual(due([agent], [noteEv(50, "a")]), { due: false, why: "2 sessions since the last dream" });
+  const three = [noteEv(50, "a"), verdict(30, "b")];
+  assert.deepEqual(due([agent], three), { due: true, why: "3 sessions, no dream yet" });
+  // after a dream: no new material, however long ago and however many sessions
+  const dreamt = [...three, ev(28, "b", { kind: "dream", auto: true }), verdict(20, "c"), verdict(10, "d")];
+  assert.deepEqual(due([agent], dreamt), { due: false, why: "no new material since the last dream" });
+  // the changes a dream made are no material either (/profile dream records its start, its changes follow)
+  assert.equal(due([agent], [...three, ev(28, "b", { kind: "dream" }), noteEv(28, "b", { action: "remove", dream: true }), verdict(20, "c"), verdict(10, "d")]).due, false);
+  // a note changed since: material; it waits for the sessions, then for the hours
+  assert.deepEqual(due([agent], [...dreamt.slice(0, 3), noteEv(2, "c")]), { due: false, why: "2 sessions since the last dream" });
+  assert.deepEqual(due([agent], [...dreamt, noteEv(2, "d")]), { due: true, why: "3 sessions and 28 h since the last dream" });
+  assert.deepEqual(due([agent], [...three, ev(5, "b", { kind: "dream" }), noteEv(4, "c"), verdict(3, "d")]), { due: false, why: "the last dream was 5 h ago" });
+  // near the agent-note limit it does not wait
+  const many = Array.from({ length: 20 }, (_, i) => makeNote([], "agent", `fact ${i}`, undefined, "2026-11-01"));
+  assert.deepEqual(due(many, [...three, ev(1, "b", { kind: "dream" }), noteEv(0.5, "now")]), { due: true, why: "20 of 25 agent notes" });
+  assert.equal(due(many, [...three, ev(1, "b", { kind: "dream" })]).due, false, "but it needs new material");
+  // an agent note the sleep pass flagged is material on its own
+  assert.equal(due([agent], dreamt, new Map([[agent.id, "`x/y` does not exist"]])).due, true);
+});
+
+test("dream changes: agent notes are removed, merged or rewritten with evidence; user notes are only proposed; each broken rule is named", () => {
+  const a1 = makeNote([], "agent", "run `npm run build` before `npm test`", undefined, "2026-11-01");
+  const a2 = makeNote([a1], "agent", "tests import from `dist/`", "read test/x.test.ts", "2026-11-02");
+  const a3 = makeNote([a1, a2], "agent", "CI runs `npm test` on Node 22", undefined, "2026-11-03");
+  const u1 = makeNote([a1, a2, a3], "user", "keep the Makefile", undefined, "2026-11-04");
+  const notes = [a1, u1, a2, a3];
+  const parsed = parseChanges({
+    remove: [{ id: a3.id, reason: "the CI workflow states it" }],
+    add: [{ text: "Build before testing: tests import from `dist/`", evidence: "read test/x.test.ts and package.json", replaces: [a1.id, a2.id] }],
+    propose: [{ id: u1.id, reason: "there is no Makefile" }],
+  });
+  assert.deepEqual(parsed.errors, []);
+  const plan = planChanges(notes, parsed.changes, "2026-11-20");
+  assert.deepEqual(plan.errors, []);
+  const merged = plan.outcome.added[0]!.note;
+  assert.deepEqual(plan.notes.map((n) => n.id), [merged.id, u1.id], "the merged note takes the place of the first note it replaces");
+  assert.deepEqual([merged.by, merged.at, merged.text, merged.evidence], ["agent", "2026-11-20", "Build before testing: tests import from `dist/`", "read test/x.test.ts and package.json"]);
+  assert.deepEqual(plan.outcome.removed.map((r) => [r.note.id, r.reason]), [[a3.id, "the CI workflow states it"]]);
+  assert.deepEqual(plan.outcome.proposed.map((p) => [p.note.id, p.reason]), [[u1.id, "there is no Makefile"]]);
+  assert.deepEqual(describeDream(plan.outcome), [
+    `the automatic dream removed [${a3.id}] (the CI workflow states it); merged [${a1.id}], [${a2.id}] into [${merged.id}] — /profile notes lists the notes`,
+    `the automatic dream suggests removing your note [${u1.id}] “keep the Makefile”: there is no Makefile — /profile notes rm ${u1.id} removes it`,
+  ]);
+  assert.deepEqual(describeDream({ removed: [], added: [], proposed: [] }, formatUsage(12_345, 0.0234)), ["the automatic dream checked the notes and changed nothing (12.3k tokens, $0.02)"]);
+  assert.deepEqual([formatUsage(0, 0), formatUsage(950, 0), formatUsage(2000, 0.004)], ["", "950 tokens", "2.0k tokens, $0.0040"]);
+  // each rule, with the reason the model reads
+  const bad = planChanges(
+    notes,
+    parseChanges({
+      remove: [{ id: u1.id, reason: "r" }, { id: "ffffff" }],
+      add: [{ text: "x", evidence: "" }, { text: a3.text, evidence: "e" }, { text: "new", evidence: "e", replaces: [u1.id] }],
+      propose: [{ id: a1.id, reason: "r" }, { id: u1.id, reason: "" }],
+    }).changes,
+  ).errors;
+  assert.deepEqual(bad, [
+    `remove: [${u1.id}] is a user note: put it in propose`,
+    "remove: no note has the id ffffff",
+    'add "x": evidence is required (what you read or found)',
+    `add "${a3.text}": it repeats [${a3.id}]`,
+    `add "new": [${u1.id}] is a user note: put it in propose`,
+    `propose: [${a1.id}] is an agent note: remove or replace it`,
+    `propose [${u1.id}]: a reason is required (the user reads it)`,
+  ]);
+  assert.deepEqual(parseChanges({ remove: "x", add: [1] }).errors, ["remove must be a list", "add: each entry must be an object"]);
+  assert.deepEqual(planChanges(notes, parseChanges({ remove: [{ id: a1.id }], add: [{ text: "m", evidence: "e", replaces: [a1.id] }] }).changes).errors, [`add "m": [${a1.id}] is already removed or replaced`]);
+  const full = Array.from({ length: 25 }, (_, i) => makeNote([], "agent", `fact ${i}`, undefined, "2026-11-01"));
+  assert.deepEqual(planChanges(full, parseChanges({ add: [{ text: "one more", evidence: "e" }] }).changes).errors, ['add "one more": it would make more than 25 agent notes']);
+  // applied to notes that changed during the dream: the change whose note is gone is left out, the rest applies
+  const later = planChanges([a1, u1, a3], parsed.changes, "2026-11-20");
+  assert.equal(later.errors.length, 1);
+  assert.ok(later.errors[0]!.endsWith(`no note has the id ${a2.id}`), later.errors[0]);
+  assert.deepEqual(later.notes.map((n) => n.id), [a1.id, u1.id]);
+});
+
+test("dream tools: read stays inside the repository, never opens files that may hold secrets, masks credentials, numbers and pages lines; search finds tracked text", async () => {
+  const root = tmp();
+  write(root, "src/a.ts", "line one\nline two\n");
+  write(root, ".env", "OPENAI_API_KEY=abc\n");
+  write(root, ".env.example", "OPENAI_API_KEY=your-key\n");
+  write(root, "config/token.txt", `token = ghp_${"a1B2".repeat(9)}\n`);
+  write(root, "deploy/id_ed25519", "x");
+  write(root, "keys/k.txt", "-----BEGIN OPENSSH " + "PRIVATE KEY-----\nabc\n"); // split: the source holds no key header
+  write(root, "big.txt", Array.from({ length: 2000 }, (_, i) => `row ${i}`).join("\n"));
+  const outside = tmp();
+  write(outside, "secret.txt", "x");
+  const read = (p: string, offset?: number) => dreamRead([root], p, offset);
+  assert.deepEqual(read("src/a.ts"), { text: "1: line one\n2: line two\n", isError: false });
+  assert.deepEqual(read(".env"), { text: ".env may hold secrets: it is not readable here", isError: true });
+  assert.equal(read(".env.example").isError, false, "a template is readable");
+  assert.ok(read("deploy/id_ed25519").isError && read("keys/k.txt").isError);
+  assert.ok(read("config/token.txt").text.includes("[GitHub token redacted]") && !read("config/token.txt").text.includes("ghp_"), read("config/token.txt").text);
+  assert.deepEqual(read(join(outside, "secret.txt")), { text: `${join(outside, "secret.txt")} is outside the repository`, isError: true });
+  assert.ok(read(`../${basename(outside)}/secret.txt`).isError);
+  if (!IS_WIN) {
+    symlinkSync(outside, join(root, "link"));
+    assert.ok(read("link/secret.txt").text.endsWith("is outside the repository"), "a symlink out of the repository is outside it");
+  }
+  assert.ok(read("src").text.startsWith("src (1 entries):\na.ts"), read("src").text);
+  assert.deepEqual(read("nope.ts"), { text: "nope.ts does not exist", isError: true });
+  const page = read("big.txt").text;
+  const next = Number(page.match(/offset (\d+) for more\)$/)?.[1]);
+  assert.ok(page.startsWith("1: row 0\n") && page.length < 6200 && next > 100, page.slice(-120));
+  assert.ok(read("big.txt", next).text.startsWith(`${next}: row ${next - 1}\n`));
+  // search: git grep over tracked files, literal and case-insensitive, never a secret file's lines
+  const { execSync } = process.getBuiltinModule("node:child_process") as typeof import("node:child_process");
+  write(root, "src/db.ts", "export const url = process.env.DATABASE_URL;\n");
+  write(root, ".env", "DATABASE_URL=postgres://u:p@h/db\n");
+  execSync("git init -q && git add -f src .env", { cwd: root });
+  const signal = new AbortController().signal;
+  assert.deepEqual(await dreamSearch(root, "database_url", undefined, signal), { text: "src/db.ts:1:export const url = process.env.DATABASE_URL;", isError: false });
+  assert.deepEqual(await dreamSearch(root, "nothing like this", "src", signal), { text: "no matches", isError: false });
+  assert.ok((await dreamSearch(outside, "x.y", undefined, signal)).isError, "no git repository: an error, not an empty result");
+  rmSync(root, { recursive: true, force: true });
+  rmSync(outside, { recursive: true, force: true });
+});
+
+test("dream loop: tools until a valid apply_changes; a rejected change goes back to the model with its reason; the ends that apply nothing", async () => {
+  const a1 = makeNote([], "agent", "old fact", undefined, "2026-11-01");
+  const u1 = makeNote([a1], "user", "user fact", undefined, "2026-11-01");
+  const call = (id: string, name: string, args: Record<string, unknown>) => ({ type: "toolCall", id, name, arguments: args });
+  const scripted = (replies: DreamReply[]) => {
+    const seen: any[][] = [];
+    const model: DreamModel = async (req) => {
+      seen.push(structuredClone(req.messages) as any[]);
+      const r = replies.shift();
+      if (!r) throw new Error("no more replies");
+      return r;
+    };
+    return { model, seen };
+  };
+  let readText = "content";
+  const tools: DreamTools = { read: (p) => ({ text: `${readText} of ${p}`, isError: false }), search: async () => ({ text: "no matches", isError: false }) };
+  const prompt = { system: "S", user: "U" };
+  const signal = new AbortController().signal;
+  const { model, seen } = scripted([
+    { stopReason: "toolUse", content: [call("1", "read", { path: "README.md" })], usage: { totalTokens: 1000, cost: { total: 0.01 } } },
+    { stopReason: "toolUse", content: [call("2", "apply_changes", { remove: [{ id: u1.id, reason: "r" }] })], usage: { totalTokens: 500 } },
+    { stopReason: "toolUse", content: [call("3", "apply_changes", { remove: [{ id: a1.id, reason: "wrong" }], propose: [{ id: u1.id, reason: "r" }] })] },
+  ]);
+  const run = await runDream(model, prompt, [a1, u1], tools, signal);
+  assert.deepEqual(run, { status: "done", changes: { remove: [{ id: a1.id, reason: "wrong" }], add: [], propose: [{ id: u1.id, reason: "r" }] }, steps: 3, calls: ["read", "apply_changes", "apply_changes"], tokens: 1500, cost: 0.01 });
+  assert.deepEqual(seen[0], [{ role: "user", content: "U", timestamp: seen[0]![0].timestamp }]);
+  const results = seen[2]!.filter((m) => m.role === "toolResult");
+  assert.deepEqual(results.map((m) => [m.toolCallId, m.toolName, m.isError]), [["1", "read", false], ["2", "apply_changes", true]]);
+  assert.equal(results[0].content[0].text, "content of README.md");
+  assert.ok(results[1].content[0].text.includes(`[${u1.id}] is a user note: put it in propose`), results[1].content[0].text);
+  // the model ends without apply_changes: done, nothing to apply
+  const quiet = scripted([{ stopReason: "stop", content: [{ type: "text" }] }]);
+  assert.deepEqual(await runDream(quiet.model, prompt, [a1], tools, signal), { status: "done", changes: { remove: [], add: [], propose: [] }, why: "the model ended without apply_changes", steps: 1, calls: [], tokens: 0, cost: 0 });
+  // a provider error or an abort: failed, and the next session tries again
+  const err = scripted([{ stopReason: "error", errorMessage: "429 rate limited", content: [] }]);
+  assert.deepEqual(await runDream(err.model, prompt, [a1], tools, signal), { status: "failed", error: "429 rate limited", steps: 1, calls: [], tokens: 0, cost: 0 });
+  const aborted = new AbortController();
+  aborted.abort();
+  assert.equal((await runDream(scripted([]).model, prompt, [a1], tools, aborted.signal)).status, "failed");
+  // it never concludes: the step limit ends it; the reading budget runs out first; the last call is told
+  readText = "x".repeat(DREAM_TOOL_BUDGET);
+  const reads = scripted(Array.from({ length: DREAM_MAX_STEPS }, (_, i) => ({ stopReason: "toolUse", content: [call(String(i), "read", { path: "x" })] })));
+  const capped = await runDream(reads.model, prompt, [a1], tools, signal);
+  assert.deepEqual([capped.status, capped.status === "done" && capped.why, capped.steps], ["done", `no apply_changes within ${DREAM_MAX_STEPS} model calls`, DREAM_MAX_STEPS]);
+  const lastResult = reads.seen.at(-1)!.at(-1);
+  assert.ok(lastResult.content[0].text.startsWith("the reading budget is used up") && lastResult.content[0].text.endsWith("[one model call is left: call apply_changes now]"), lastResult.content[0].text);
 });
 
 test("sleep pass: notes naming paths that no longer exist are flagged; overrides equal to detection are redundant", () => {

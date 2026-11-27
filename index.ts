@@ -20,9 +20,9 @@ import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { basename, isAbsolute, join, relative, sep } from "node:path";
 import { agentDir, configPath, loadConfig, writeDefaultConfig } from "./config.ts";
 import { findProjectRoot, nearestProjectDir } from "./detect/index.ts";
-import { exists, ext, readText, realpath, tildify, uniq } from "./fs-utils.ts";
+import { exists, ext, readText, realpath, tildify, tryLock, uniq } from "./fs-utils.ts";
 import { availability, effectiveChecks, effectiveCommands, renderPromptSection, renderReport, tierAllowed } from "./profile/render.ts";
-import { loadOrDetect, profilePath, updateUser } from "./profile/store.ts";
+import { dreamLockPath, loadOrDetect, profilePath, updateUser } from "./profile/store.ts";
 import { forgetRepo, pruneStorage, renderStorage, storageReport } from "./profile/storage.ts";
 import { checkKey, type Check, type GateVerdict, type ProfileConfig, type StoredProfile, type Tier } from "./types.ts";
 import { collectChanges, displayPath, newTracker, peekChanges, snapshotStart, toolPath, type ChangeTracker } from "./verify/changes.ts";
@@ -36,11 +36,15 @@ import { fixHint } from "./verify/hints.ts";
 import { doctorReport } from "./profile/doctor.ts";
 import { duplicateOf, findNote, listNotes, makeNote, MAX_AGENT_NOTES, MAX_EVIDENCE_CHARS, MAX_NOTE_CHARS, redundantOverrides, validateNotes } from "./profile/memory.ts";
 import { appendHistory, historyForDream, historyPath, readHistory, renderHistory, summarizeHistory, type HistoryInput } from "./profile/history.ts";
+import { describeDream, DREAM_LOCK_STALE_MS, dreamDue, dreamPrompt, dreamRead, dreamSearch, formatUsage, planChanges, runDream, type DreamModel, type DreamOutcome, type DreamRun } from "./profile/dream.ts";
 import { discoverRules, generatedPatterns, generatedReason, matchingRules, nestedInstructionFiles, readInstruction, renderInjection, type InjectionPart, type ScopedRule } from "./profile/scoped.ts";
 import { appendFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname } from "node:path";
 import { spawnSync } from "node:child_process";
+
+/** The request type of an extension model call (π's Context), without a dependency on pi-ai. */
+type ModelContext = Parameters<ExtensionContext["modelRegistry"]["streamSimple"]>[1];
 
 const VERIFY_MSG = "project-profile/verify";
 /** The custom message that starts a `/profile dream` run (see SessionState.dreaming). */
@@ -139,6 +143,8 @@ interface SessionState {
    * a run started by a custom message emits before_agent_start only in newer π versions.
    */
   dreaming: boolean;
+  /** The automatic dream of this session: started at most once, after a settled run; aborted at shutdown. */
+  autoDream?: AbortController;
   mode: string;
   hasUI: boolean;
 }
@@ -255,7 +261,7 @@ export default function projectProfile(pi: ExtensionAPI) {
   /**
    * Sleep pass: validate memory against ground truth without a model call. Notes that name paths
    * that no longer exist and overrides that detection now reproduces are flagged to the user (and the
-   * stale notes in the prompt), never removed: the user or a `/profile dream` decides.
+   * stale notes in the prompt), never removed: the user or a dream decides.
    */
   function sleepPass(ctx: ExtensionContext, stored: StoredProfile, announce: boolean): void {
     const st = s!;
@@ -722,6 +728,7 @@ export default function projectProfile(pi: ExtensionAPI) {
 
   pi.on("session_shutdown", async (_event, ctx) => {
     s?.abort.abort();
+    s?.autoDream?.abort();
     setStatus(ctx, undefined);
   });
 
@@ -1172,7 +1179,7 @@ export default function projectProfile(pi: ExtensionAPI) {
           const n = makeNote(u.notes, "agent", text, params.evidence);
           u.notes.push(n);
           id = n.id;
-          record({ kind: "note", action: "add", by: "agent", id: n.id, text: n.text.slice(0, 80) });
+          record({ kind: "note", action: "add", by: "agent", id: n.id, text: n.text.slice(0, 80), ...(s?.dreaming ? { dream: true as const } : {}) });
         });
         invalidateSection();
         notify(ctx, `project-profile: the agent noted [${id}] “${short(text)}” — /profile notes rm ${id} removes it`, "info");
@@ -1201,7 +1208,7 @@ export default function projectProfile(pi: ExtensionAPI) {
         updateUser(dir, stored, (u) => {
           u.notes = u.notes.filter((n) => n.id !== target.id);
         });
-        record({ kind: "note", action: "remove", by: "agent", id: target.id, text: target.text.slice(0, 80) });
+        record({ kind: "note", action: "remove", by: "agent", id: target.id, text: target.text.slice(0, 80), ...(s.dreaming ? { dream: true as const } : {}) });
         s.stale.delete(target.id);
         invalidateSection();
         notify(ctx, `project-profile: the agent removed note [${target.id}] “${short(target.text)}”${params.reason ? ` — ${params.reason}` : ""}`, "info");
@@ -1231,6 +1238,80 @@ export default function projectProfile(pi: ExtensionAPI) {
     lines.push("");
     lines.push("Memory is for what a future session cannot read off the repository and would otherwise learn the hard way again. Check each note against the repository: read what it names, run read-only commands when that settles it. Remove a note that is wrong, that duplicates another, or that the repository's own files or instruction files now state (`forget_note`). Merge overlapping notes into one with evidence (`remember` the merged note, then `forget_note` the parts). Add evidence to a note that has none when you can verify it. A recurring failure above deserves a note only when its cause is a project fact the profile does not show. Keep the set small: a note earns its place only if a future session would act differently because of it. Do not change any file in the repository and do not fix the failures listed. End with a short summary of what you kept, changed and removed, and why.");
     return lines.join("\n");
+  }
+
+  // ------------------------------------------------------------------ the automatic dream (profile/dream.ts)
+  pi.on("agent_settled", async (event, ctx) => {
+    if (!s || event.aborted) return;
+    maybeAutoDream(ctx);
+  });
+
+  /**
+   * Start the automatic dream in the background when `dreamDue` says so: interactive sessions in trusted
+   * projects only, once per session, and one π process per repository at a time (a lock file).
+   */
+  function maybeAutoDream(ctx: ExtensionContext): void {
+    const st = s!;
+    const stored = st.stored;
+    if (!stored || st.autoDream || st.dreaming) return;
+    if (!st.config.profile.autoDream || !st.config.profile.agentNotes) return;
+    if (ctx.mode !== "tui" || !ctx.isProjectTrusted()) return;
+    const registry = ctx.modelRegistry;
+    const model = ctx.model;
+    if (!model || typeof registry?.streamSimple !== "function") return; // a π without extension model calls
+    const events = readHistory(dir, st.root);
+    const due = dreamDue({ notes: stored.user.notes, stale: st.stale, events, session: st.sessionId, now: Date.now() });
+    debug("auto-dream-gate", { due: due.due, why: due.why });
+    if (!due.due) return;
+    let release: (() => void) | undefined;
+    try {
+      release = tryLock(dreamLockPath(dir, st.root), DREAM_LOCK_STALE_MS);
+    } catch {
+      /* the state directory is not writable */
+    }
+    if (!release) return;
+    const abort = new AbortController();
+    st.autoDream = abort;
+    const profile = renderPromptSection({ ...stored, user: { ...stored.user, notes: [] } }, st.config, { verifyEnabled: verifyEnabled(), piLoadedContextFiles: [] });
+    const prompt = dreamPrompt({ notes: stored.user.notes, stale: st.stale, history: historyForDream(summarizeHistory(events)), profile, instructionFiles: stored.detected.instructionFiles.map((f) => f.path) });
+    const roots = uniq([st.root, st.gitRoot ?? st.root]);
+    const call: DreamModel = (request, signal) => registry.streamSimple(model, request as unknown as ModelContext, { signal }).result();
+    debug("auto-dream-start", { model: `${model.provider}/${model.id}`, notes: stored.user.notes.length });
+    void runDream(call, prompt, stored.user.notes, { read: (p, o) => dreamRead(roots, p, o), search: (t, p, signal) => dreamSearch(st.root, t, p, signal) }, abort.signal)
+      .then((run) => finishAutoDream(ctx, run, abort.signal))
+      .catch((err: Error) => debug("auto-dream-error", { error: err.message }))
+      .finally(release);
+  }
+
+  /** Apply a finished dream to the notes as they are now (another session may have changed them meanwhile), record it and tell the user. */
+  function finishAutoDream(ctx: ExtensionContext, run: DreamRun, signal: AbortSignal): void {
+    const st = s!;
+    debug("auto-dream", run.status === "failed" ? { status: run.status, error: run.error, steps: run.steps, calls: run.calls, tokens: run.tokens, cost: run.cost } : { status: run.status, why: run.why, steps: run.steps, calls: run.calls, tokens: run.tokens, cost: run.cost, changes: run.changes });
+    if (signal.aborted || !st.stored) return; // the session ended: nothing applies, and a later session tries again
+    const usage = formatUsage(run.tokens, run.cost);
+    if (run.status === "failed") {
+      notify(ctx, `project-profile: the automatic dream stopped (${run.error}${usage ? `; ${usage}` : ""}); a later session tries again`, "info");
+      return;
+    }
+    let outcome: DreamOutcome;
+    const touchesNotes = run.changes.remove.length + run.changes.add.length > 0;
+    if (touchesNotes) {
+      const plan = updateUser(dir, st.stored, (u) => {
+        const p = planChanges(u.notes, run.changes);
+        u.notes = p.notes;
+        return p;
+      });
+      if (plan.errors.length) debug("auto-dream-skipped", { errors: plan.errors });
+      outcome = plan.outcome;
+    } else outcome = planChanges(st.stored.user.notes, run.changes).outcome; // proposals only: no write
+    for (const r of outcome.removed) record({ kind: "note", action: "remove", by: "agent", id: r.note.id, text: r.note.text.slice(0, 80), dream: true });
+    for (const a of outcome.added) {
+      for (const n of a.replaced) record({ kind: "note", action: "remove", by: "agent", id: n.id, text: n.text.slice(0, 80), dream: true });
+      record({ kind: "note", action: "add", by: "agent", id: a.note.id, text: a.note.text.slice(0, 80), dream: true });
+    }
+    record({ kind: "dream", auto: true });
+    if (touchesNotes) sleepPass(ctx, st.stored, false);
+    for (const line of describeDream(outcome, usage)) notify(ctx, `project-profile: ${line}`, "info");
   }
 
   // ------------------------------------------------------------------ /profile

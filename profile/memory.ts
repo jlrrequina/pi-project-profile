@@ -9,7 +9,8 @@
  *  - the prompt shows notes within a character budget and points at the rest instead of dropping it;
  *  - the sleep pass at session start validates each note against the repository (paths it names
  *    that no longer exist) and each override against fresh detection (an override that detection
- *    now reproduces). Findings are flagged, never deleted: the user or a `/profile dream` decides.
+ *    now reproduces). Findings are flagged, never deleted: the user or a dream decides (`/profile dream`,
+ *    or the automatic dream in dream.ts, which checks the notes with a model).
  */
 import { existsSync } from "node:fs";
 import { isAbsolute, join } from "node:path";

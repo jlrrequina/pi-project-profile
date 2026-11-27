@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { accessSync, constants, existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, closeSync, constants, existsSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -139,6 +139,84 @@ export function sha1File(p: string): string | undefined {
     return createHash("sha1").update(readFileSync(p)).digest("hex");
   } catch {
     return undefined;
+  }
+}
+
+/**
+ * Take an exclusive lock file. Returns its release function, or undefined while a live holder has it.
+ * A lock older than `staleMs`, or whose process is gone, is taken over. Throws when no lock file can be
+ * created at all (an unwritable directory).
+ */
+export function tryLock(path: string, staleMs: number): (() => void) | undefined {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      mkdirSync(dirname(path), { recursive: true });
+      const fd = openSync(path, "wx");
+      try {
+        writeSync(fd, JSON.stringify({ pid: process.pid, t: new Date().toISOString() }));
+      } finally {
+        closeSync(fd);
+      }
+      return () => {
+        try {
+          unlinkSync(path);
+        } catch {
+          /* already gone */
+        }
+      };
+    } catch (err) {
+      if ((err as { code?: string }).code !== "EEXIST") throw err;
+      if (!lockIsStale(path, staleMs)) return undefined;
+      try {
+        unlinkSync(path);
+      } catch {
+        /* another process took it over first */
+      }
+    }
+  }
+  return undefined;
+}
+
+function lockIsStale(path: string, staleMs: number): boolean {
+  let age: number;
+  try {
+    age = Date.now() - statSync(path).mtimeMs;
+  } catch {
+    return true; // released meanwhile
+  }
+  if (age > staleMs) return true;
+  let pid: unknown;
+  try {
+    pid = (JSON.parse(readFileSync(path, "utf8")) as { pid?: unknown }).pid;
+  } catch {
+    return age > 1000; // being written right now, or torn by a crash
+  }
+  if (typeof pid !== "number" || pid === process.pid) return false;
+  try {
+    process.kill(pid, 0);
+    return false;
+  } catch (err) {
+    return (err as { code?: string }).code === "ESRCH";
+  }
+}
+
+/**
+ * Run `fn` while holding a lock file, after waiting up to `waitMs` for another holder. Without the lock
+ * (still held after the wait, or an unwritable directory) `fn` runs anyway: the lock closes a race
+ * between processes, and it must never stop a write.
+ */
+export function withLockSync<T>(path: string, fn: () => T, waitMs = 2000, staleMs = 10_000): T {
+  let release: (() => void) | undefined;
+  try {
+    const t0 = Date.now();
+    while (!(release = tryLock(path, staleMs)) && Date.now() - t0 < waitMs) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 20);
+  } catch {
+    /* no lock possible here: write as before */
+  }
+  try {
+    return fn();
+  } finally {
+    release?.();
   }
 }
 

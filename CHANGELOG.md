@@ -2,6 +2,10 @@
 
 ## Unreleased
 
+- **The automatic dream: memory consolidates itself.** After a run settles in an interactive session, the session's model checks the agent's notes against the repository in the background. It starts when the notes have changed since the last dream (or the sleep pass flagged an agent note), and 24 hours and 3 sessions have passed since that dream; from 20 agent notes on, it does not wait. Its tools only read: files inside the repository, never `.env` files, keys or credential files, and credentials in known formats are masked. It ends with one set of changes, and the extension checks each change before it applies it: wrong or duplicated agent notes go, overlapping ones are merged, evidence is added. A user note it can only propose for removal, with the `/profile notes rm` command. At most 12 model calls, once per session, and one π process per repository at a time (a lock file); when the session ends first, nothing applies and a later session tries again. One notification says what changed and what it cost. Print, JSON and RPC sessions never start it; `profile.autoDream: false` turns it off. Before, the notes were consolidated only when the user typed `/profile dream`. This is the only model call that the extension starts by itself.
+- Notes saved by one session are no longer lost when another session on the same repository writes. Each session wrote its own copy of the notes, so a note that another session had saved since this one started disappeared at this session's next write. Each change now starts from the file, under a lock file.
+- History: a note change made in a dream is marked `dream: true`, and an automatic dream is recorded as `{ "kind": "dream", "auto": true }` after its changes. The next dream does not count a dream's own changes as new material.
+
 ## 1.5.2 — 2026-11-22
 
 - Tested with π 1.5.2. The tests now run on `@earendil-works/pi-coding-agent` and `@earendil-works/pi-tui` 1.5.2 (1.5.1 was tested on 1.5.0) and pass. The supported π versions do not change. The extension code did not change.

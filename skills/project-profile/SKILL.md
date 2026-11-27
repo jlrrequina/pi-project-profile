@@ -15,7 +15,7 @@ metadata:
 
 1. **Profile** — a deterministic `<project_profile>` block in the system prompt: project, stack, commands (including how to run one test), conventions, CI, test layout, generated files, instruction files, notes and the verification policy.
 2. **Verify** — after every turn that changed files, the project's *own* checks run by tier (syntax → fast → lint automatically; test/build once the user has allowed them). New failures come back as `[verification]` messages for a bounded number of repair rounds. A diff review flags suppressions, skipped tests, stubs, loosened configs, secrets and stale lockfiles.
-3. **Memory** — per-repository notes with author, date and evidence (the `remember` and `forget_note` tools, `/profile note`), validated against the repository at session start, consolidated on `/profile dream`, plus a gate history (`/profile history`) and a pre-existing-failure baseline that survives between sessions on an unchanged tree.
+3. **Memory** — per-repository notes with author, date and evidence (the `remember` and `forget_note` tools, `/profile note`), validated against the repository at session start, consolidated by the automatic dream in the background or on `/profile dream`, plus a gate history (`/profile history`) and a pre-existing-failure baseline that survives between sessions on an unchanged tree.
 
 The extension never writes into the repository. Cache, notes, history, baselines and per-repo settings live under `~/.pi/agent/project-profile/`; logs under `$TMPDIR/pi-project-profile/`. `/profile storage` shows and prunes them.
 
@@ -53,7 +53,8 @@ Memory is for what a future session cannot read off the repository and would oth
 - `remember({ text, evidence })` saves a note for this repository (outside it, shown under `Notes:` from the next prompt on). Worth a note: a command that must run before another, an environment variable the tests need, a convention no check enforces, a trap you fell into. Not worth one: anything the repository, its instruction files or the profile already state; task progress; a guess. Put paths and commands in backticks (the session-start check validates paths). `evidence` says how you know — what you ran or read. At most 25 agent notes per repository; the tool refuses more until one is merged or removed. The user sees every note you save and can remove it.
 - When a repair round told you the cause was a project fact the profile did not show, save it once the fix is confirmed. Skip it when the cause was in your own change.
 - `forget_note({ id, reason })` removes one of your notes that proved wrong, duplicates another, or that the repository now states. Notes written by the user can be removed only during a `/profile dream` run; otherwise tell the user which note to remove and why.
-- A **dream** is a run the user starts with `/profile dream`: the message lists the notes with ids, the user's command overrides and the verification history. Check each note against the repository (read what it names; run read-only commands when that settles it), remove what is wrong or duplicated, merge overlapping notes into one with evidence, add evidence where you can verify it, write a note for a recurring failure only when its cause is a project fact the profile does not show. Change no repository file and fix no failure. End with a short summary of what you kept, changed and removed, and why.
+- The **automatic dream** runs in the background, with the session's model and read-only tools, after a run settles in an interactive session when the notes have changed since the last dream (and 24 hours and 3 sessions have passed, or 20 agent notes exist). It removes, merges and rewrites agent notes, and proposes the removal of a user note to the user. Nothing is asked of you, but a merged note gets a new id: the `Notes:` line of the next prompt is current.
+- A **dream** that the user starts with `/profile dream` is a run in the session: the message lists the notes with ids, the user's command overrides and the verification history. Check each note against the repository (read what it names; run read-only commands when that settles it), remove what is wrong or duplicated, merge overlapping notes into one with evidence, add evidence where you can verify it, write a note for a recurring failure only when its cause is a project fact the profile does not show. Change no repository file and fix no failure. End with a short summary of what you kept, changed and removed, and why.
 
 ## What the `[verification]` messages mean
 
@@ -88,7 +89,7 @@ The model cannot invoke slash commands. When configuration must change, give the
 | `/profile tests allow\|deny\|ask` · `/profile build allow\|deny\|ask` | Permission for the test and build tiers in this repo. |
 | `/profile verify on\|off\|default` | Per-repo switch for the gate (`default` follows the global config). |
 | `/profile history` | The gate's history for this repo: tasks, first-attempt failures per check with the auto-fix offered, environment failures by session, review findings, pre-existing failures, patterns. |
-| `/profile dream` | Start a dream run (see Memory). Needs `profile.agentNotes`. |
+| `/profile dream` | Start a dream run now (see Memory); unlike the automatic dream, it may remove user notes. Needs `profile.agentNotes`. |
 | `/profile storage [prune]` | Sizes of profiles, history, baselines and logs; `prune` removes what nothing can use (orphans, expired baselines, torn writes). |
 | `/profile forget` | Drop this repo's profile, notes, history and baseline, then re-detect. |
 | `/profile config` | Create or locate `~/.pi/agent/project-profile/config.json` and report unknown keys. |
@@ -107,7 +108,8 @@ The model cannot invoke slash commands. When configuration must change, give the
 | A `Notes:` entry says scripts.lint runs a package's `lint`, which auto-fixes | A workspace script (`turbo run lint`, `pnpm -r lint`) reaches a package script with `--fix`/`--write` (it would rewrite files) or `--watch` | Nothing to fix: each package is checked with its own read-only checks. To run one command instead: `/profile set lint <read-only command>` |
 | A note carries `[may be stale: …]` | A path the note names no longer exists in the repository | Verify the note before relying on it; if it is wrong and yours, `forget_note`; if the user's, say so (`/profile notes rm <id>`) |
 | "detection now gives the same command as your override" at session start | The repository changed so the override is redundant | `/profile set <key> default` removes it (the user decides) |
-| `remember` answers "limit reached" | 25 agent notes exist for this repo | Merge or remove one of yours with `forget_note`, or ask the user to run `/profile dream` |
+| `remember` answers "limit reached" | 25 agent notes exist for this repo | Merge or remove one of yours with `forget_note`, or ask the user to run `/profile dream` (the automatic dream starts on its own from 20 agent notes, after a run settles) |
+| "the automatic dream stopped (…); a later session tries again" | The model call failed (a provider error, a rate limit) | Nothing to do: nothing was applied. `PI_PROJECT_PROFILE_DEBUG=1` traces it; `profile.autoDream: false` turns it off |
 | "already fails on the untouched tree (… baseline from yesterday, tree unchanged)" | The last session's baseline was restored because HEAD, dirty files, manifests and installed dependencies are unchanged | Nothing to do; `verify.baselineCache: false` disables the cache, `/profile forget` drops it |
 | Wrong project root (monorepo member vs workspace) | Start directory | `/profile path` shows the roots; run π from the intended directory |
 | Prompt section too large / instruction file inlined | `profile.maxInstructionFileChars` (3000) and `maxInstructionTotalChars` (6000) | Adjust in `config.json`; large files are listed instead of inlined |
@@ -131,7 +133,8 @@ The model cannot invoke slash commands. When configuration must change, give the
   "profile": {
     "inject": true, "scopedInstructions": true, "inlineInstructionFiles": true,
     "maxInstructionFileChars": 3000, "maxInstructionTotalChars": 6000,
-    "agentNotes": true,                         // the remember/forget_note tools and /profile dream
+    "agentNotes": true,                         // the remember/forget_note tools, /profile dream and the automatic dream
+    "autoDream": true,                          // the automatic dream: background consolidation of agent notes (interactive sessions)
     "maxNotesChars": 1200                       // notes shown in the prompt; the rest is referenced by path
   },
   "ignoreDirs": [".git", "node_modules", "dist", "target", "vendor", ".venv", "…"]

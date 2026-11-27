@@ -205,8 +205,14 @@ export interface ProfileConfig {
     inlineInstructionFiles: boolean;
     /** Deliver nested AGENTS.md/CLAUDE.md and glob-scoped rules (.cursor/rules, .github/instructions, .windsurf/rules) when the agent first touches a file they apply to. */
     scopedInstructions: boolean;
-    /** Give the agent the `remember` and `forget_note` tools and `/profile dream`; off = notes are written by the user only (`/profile note`). */
+    /** Give the agent the `remember` and `forget_note` tools, `/profile dream` and the automatic dream; off = notes are written by the user only (`/profile note`). */
     agentNotes: boolean;
+    /**
+     * The automatic dream (profile/dream.ts): after a run settles in an interactive session, when the notes changed
+     * since the last dream, the session's model checks the agent's notes against the repository in the background
+     * with read-only tools. It removes, merges and rewrites agent notes only; it proposes removing a user note.
+     */
+    autoDream: boolean;
     /** Characters of notes shown in the prompt section; the rest is referenced by path. */
     maxNotesChars: number;
   };
@@ -237,6 +243,7 @@ export const DEFAULT_CONFIG: ProfileConfig = {
     inlineInstructionFiles: true,
     scopedInstructions: true,
     agentNotes: true,
+    autoDream: true,
     maxNotesChars: 1200,
   },
   ignoreDirs: [

@@ -56,7 +56,7 @@ test("skill: Agent Skills frontmatter is valid and the name matches its director
   const subs = index.match(/const SUBS = \[([^\]]+)\]/)![1]!.match(/"(\w+)"/g)!.map((s) => s.replace(/"/g, ""));
   for (const sub of subs) assert.ok(sub === "show" || sub === "help" || src.includes(`/profile ${sub}`), `skill documents /profile ${sub}`);
   for (const tool of ["run_checks", "remember", "forget_note"]) assert.ok(index.includes(`name: "${tool}"`) && src.includes(`\`${tool}\``), `skill documents the ${tool} tool`);
-  for (const key of ["maxRepairRounds", "runTests", "runBuild", "guard", "perTurn", "headless", "concurrency", "baselineCache", "scopedInstructions", "maxInstructionFileChars", "agentNotes", "maxNotesChars"]) {
+  for (const key of ["maxRepairRounds", "runTests", "runBuild", "guard", "perTurn", "headless", "concurrency", "baselineCache", "scopedInstructions", "maxInstructionFileChars", "agentNotes", "autoDream", "maxNotesChars"]) {
     assert.ok(src.includes(key), `skill documents config key ${key}`);
     assert.ok(read("types.ts").includes(key), `config key ${key} exists`);
   }

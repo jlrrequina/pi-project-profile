@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { DETECTOR_VERSION, detectProject } from "../detect/index.ts";
-import { fileStamp, sha1 } from "../fs-utils.ts";
+import { fileStamp, sha1, withLockSync } from "../fs-utils.ts";
 import type { DetectedProfile, ProfileConfig, StoredProfile, UserData } from "../types.ts";
 import { migrateNotes } from "./memory.ts";
 
@@ -11,6 +11,11 @@ export function profilesDir(agentDir: string): string {
 
 export function profilePath(agentDir: string, root: string): string {
   return join(profilesDir(agentDir), `${sha1(root).slice(0, 16)}.json`);
+}
+
+/** Held while an automatic dream of the repository runs, so two π processes do not dream at once. */
+export function dreamLockPath(agentDir: string, root: string): string {
+  return join(profilesDir(agentDir), `${sha1(root).slice(0, 16)}.dream.lock`);
 }
 
 export function emptyUserData(): UserData {
@@ -74,8 +79,18 @@ export function loadOrDetect(agentDir: string, root: string, config: ProfileConf
   return { stored, refreshed: true };
 }
 
-export function updateUser(agentDir: string, stored: StoredProfile, mutate: (u: UserData) => void): void {
-  mutate(stored.user);
-  stored.updatedAt = new Date().toISOString();
-  saveStored(agentDir, stored);
+/**
+ * Change the user data of a profile. Another session on the same repository, or the automatic dream,
+ * may have written since this one loaded the profile: the change starts from the file, under a lock,
+ * so it never writes back an older copy of the notes.
+ */
+export function updateUser<T>(agentDir: string, stored: StoredProfile, mutate: (u: UserData) => T): T {
+  return withLockSync(`${profilePath(agentDir, stored.detected.root)}.lock`, () => {
+    const disk = loadStored(agentDir, stored.detected.root);
+    if (disk) stored.user = disk.user;
+    const result = mutate(stored.user);
+    stored.updatedAt = new Date().toISOString();
+    saveStored(agentDir, stored);
+    return result;
+  });
 }

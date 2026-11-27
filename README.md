@@ -19,7 +19,7 @@ pi install npm:@lenard9191/pi-project-profile
 - **Verify**: after every turn that changed files, runs the project's *own* checks and sends new failures back to the agent for a bounded number of repair rounds.
 - **Review**: flags what a reviewer would want to know about the agent's diff: added suppressions, skipped or focused tests, stubs, loosened configs, deleted tests, secrets, unignored `.env` files, stale lockfiles.
 - **Rules on demand**: delivers nested `AGENTS.md` files and glob-scoped rules (Cursor, Copilot, Windsurf) when the agent first touches a file they apply to, and warns before hand-editing generated files.
-- **Memory**: per-repository notes with author, date and evidence — what the agent or you worked out and the files do not show. The agent records them with a `remember` tool, a sleep pass validates them against the repository at every session start, `/profile dream` has the agent consolidate them against the verification history, and the pre-existing-failure baseline survives between sessions on an unchanged tree.
+- **Memory**: per-repository notes with author, date and evidence — what the agent or you worked out and the files do not show. The agent records them with a `remember` tool, a sleep pass validates them against the repository at every session start, an automatic dream consolidates them in the background when they have changed (`/profile dream` starts one now), and the pre-existing-failure baseline survives between sessions on an unchanged tree.
 
 It never writes into the repository. Cache, notes, history and settings live under `~/.pi/agent/project-profile/` (`/profile storage` shows and prunes them).
 
@@ -97,11 +97,12 @@ In JS and TS files, a suppression counts only as a directive that opens a commen
 
 The detected profile needs no memory: it is re-read from the repository every session. Memory is for what the files do not show and that cost effort to learn — a command that must run before another, an environment variable the tests need, a convention no check enforces. The design follows [Anthropic's components of agent memory](https://www.anthropic.com/research/components-of-agent-memory): a small injected layer, notes that carry how they were verified, and a sleep phase that checks memory against ground truth.
 
-- **Notes** live per repository under `~/.pi/agent/project-profile/`, never in the repository, and appear under `Notes:` in `<project_profile>` with their author and id: `(user 3f9a1c) …`, `(agent 8b02e4) … — evidence: …`. You write them with `/profile note <text>`; the agent writes them with the `remember` tool (text plus evidence: how it knows), at most 25 agent notes per repository, and you are told each time. `forget_note` lets the agent drop a note of its own that proved wrong; your notes it can remove only during a dream. `/profile notes` lists them with ids and dates, `/profile notes rm <id|n>` removes one.
+- **Notes** live per repository under `~/.pi/agent/project-profile/`, never in the repository, and appear under `Notes:` in `<project_profile>` with their author and id: `(user 3f9a1c) …`, `(agent 8b02e4) … — evidence: …`. You write them with `/profile note <text>`; the agent writes them with the `remember` tool (text plus evidence: how it knows), at most 25 agent notes per repository, and you are told each time. `forget_note` lets the agent drop a note of its own that proved wrong; your notes it can remove only during a `/profile dream` you start. `/profile notes` lists them with ids and dates, `/profile notes rm <id|n>` removes one.
 - **The injected layer stays small.** Notes are shown within `profile.maxNotesChars` (1200); the rest is counted and referenced by path instead of silently dropped.
 - **The learning loop.** When a repair round turns green, the repair message has already asked the agent to save the cause as a note *if* it was a project fact the profile did not show — with the evidence — and to skip it when the cause was its own change. Purpose, not a rule: what to record is the agent's judgment.
-- **Sleep pass** (deterministic, every session start and `/profile refresh`): a note that names a path that no longer exists is flagged `[may be stale: …]` in the prompt and to you; a command override that detection now reproduces is reported with `/profile set <key> default` to drop it. Nothing is removed without you.
-- **`/profile dream`**: sends the agent the notes, the overrides and the verification history with one instruction — check each note against the repository, remove what is wrong or duplicated, merge, add evidence, keep the set small, change no file — and lets it remove your notes too for that run. It ends with a summary of what it kept, changed and removed.
+- **Sleep pass** (deterministic, every session start and `/profile refresh`): a note that names a path that no longer exists is flagged `[may be stale: …]` in the prompt and to you; a command override that detection now reproduces is reported with `/profile set <key> default` to drop it. It removes nothing.
+- **Automatic dream** (`profile.autoDream`, on by default): after a run settles in an interactive session, when the notes have changed since the last dream (or the sleep pass flagged an agent note) and 24 hours and 3 sessions have passed since that dream (at once from 20 agent notes on), the session's model checks the agent's notes against the repository in the background. Its tools only read: files inside the repository, `.env` files and keys excluded, known credential formats masked. It removes wrong or duplicated agent notes, merges overlapping ones and adds evidence; your notes it can only propose for removal, with the `/profile notes rm` command. At most 12 model calls, once per session, one π process per repository at a time; you get one line with what changed and what it cost (tokens, and dollars when the provider reports them). `print`/JSON/RPC sessions never start it.
+- **`/profile dream`**: the same pass now, in your session: the agent gets the notes, the overrides and the verification history with one instruction — check each note against the repository, remove what is wrong or duplicated, merge, add evidence, keep the set small, change no file — and may remove your notes too for that run. It ends with a summary of what it kept, changed and removed.
 - **History** (`/profile history`): every verdict, repair round, environment failure, review finding and note change is one JSON line per repository (dates, labels and counts only). The report shows first-attempt failures per check with the auto-fix that was offered, environment failures by session, pre-existing failures, and patterns such as "lint failed on the first attempt in 6 of 14 tasks" — the review that used to need a read of every session transcript.
 - **Persisted baseline** (`verify.baselineCache`): the pre-existing-failure baseline is kept with a fingerprint of the tree (HEAD, every dirty file's content stamp, manifests, installed-dependency markers) for three days. A session that starts on the same tree knows what already failed before the agent's first write, without the background run and its race. Any change to the fingerprint, or no git, means no cache.
 
@@ -119,7 +120,7 @@ All of it is bounded: history files rewrite themselves past 256 KB, a baseline p
 | `/profile tests allow\|deny\|ask` | test-tier permission (same for `build`) |
 | `/profile verify on\|off` | per-repo switch for the gate |
 | `/profile history` | what the gate observed in this repo: tasks, first-attempt failures per check, environment failures, review findings, patterns |
-| `/profile dream` | the agent consolidates the notes against the repository and the history (needs `profile.agentNotes`) |
+| `/profile dream` | the agent consolidates the notes against the repository and the history now, in this session, and may remove your notes too (the automatic dream does it in the background; needs `profile.agentNotes`) |
 | `/profile storage [prune]` | sizes of everything the extension stores, and pruning on demand |
 | `/profile forget` | drop the profile, notes, history and baseline for this repo |
 | `/verify [fast\|lint\|test\|build\|all] [file…]` | run checks now, showing every failure (`/verify cancel` aborts) |
@@ -133,17 +134,18 @@ All of it is bounded: history files rewrite themselves past 256 KB, a baseline p
 ```jsonc
 {
   "verify": { "enabled": true, "maxRepairRounds": 3, "runTests": "ask", "runBuild": "ask", "guard": true, "perTurn": false, "concurrency": 0, "baselineCache": true },
-  "profile": { "inject": true, "scopedInstructions": true, "maxInstructionFileChars": 3000, "agentNotes": true, "maxNotesChars": 1200 }
+  "profile": { "inject": true, "scopedInstructions": true, "maxInstructionFileChars": 3000, "agentNotes": true, "autoDream": true, "maxNotesChars": 1200 }
 }
 ```
 
-`profile.agentNotes: false` removes the `remember`/`forget_note` tools and `/profile dream`; notes are then yours alone (`/profile note`). `verify.baselineCache: false` runs the background baseline every session instead of restoring it.
+`profile.agentNotes: false` removes the `remember`/`forget_note` tools, `/profile dream` and the automatic dream; notes are then yours alone (`/profile note`). `profile.autoDream: false` keeps the tools and stops only the automatic dream. `verify.baselineCache: false` runs the background baseline every session instead of restoring it.
 
 `verify.perTurn` also runs the syntax + fast tiers after every turn that changed files and adds a short informational note when red (no repair loop: multi-file edits are legitimately red half-way). `PI_PROJECT_PROFILE_DEBUG=1` writes a JSONL trace to `$TMPDIR/pi-project-profile/`.
 
 ## Design rules
 
 - Nothing is hardcoded per project; every capability degrades detected → generic → no-op, never to a wrong action.
+- The only model call the extension starts by itself is the automatic dream: interactive sessions only, read-only tools, the agent's notes only, `profile.autoDream: false` turns it off.
 - Only read-only checks run unprompted. A workspace script (`turbo run lint`, `pnpm -r lint`) is one only when every package script it runs is read-only too: a package `lint` with `--fix` would rewrite files, so its packages are checked with their own read-only checks instead. The gate runs only in projects π reports as trusted.
 - Tools are bound late (`node_modules/.bin`, `uv run`/`poetry run`/`.venv`), so the profile stays valid before and after installs.
 - Repository instructions are framed as repository content, inlined only when small, and skipped when they read like a bot directive.
@@ -166,11 +168,11 @@ No. Detection is read-only, the cache, notes, history, baselines and per-repo se
 
 ### Can the agent write to its own memory? Can I stop it?
 
-Yes, with the `remember` tool: a note with the evidence for it, at most 25 per repository, each announced to you and removable with `/profile notes rm <id>`. The agent cannot remove your notes except during a `/profile dream` you start. `profile.agentNotes: false` in `config.json` removes the tools; notes are then written only with `/profile note`.
+Yes, with the `remember` tool: a note with the evidence for it, at most 25 per repository, each announced to you and removable with `/profile notes rm <id>`. The agent cannot remove your notes except during a `/profile dream` you start. The automatic dream merges and removes the agent's notes in the background and only proposes removing yours. `profile.autoDream: false` in `config.json` stops the automatic dream; `profile.agentNotes: false` removes the tools too, and notes are then written only with `/profile note`.
 
 ### Will it run my tests or builds automatically?
 
-Only after you allow it once per repository (`/profile tests allow`, or answer the prompt the first time). Typecheck and lint run automatically because they are read-only. Installs, migrations, deploys and anything that needs the network are never run.
+Only after you allow it once per repository (`/profile tests allow`, or answer the prompt the first time). Typecheck and lint run automatically because they are read-only. Installs, migrations, deploys and commands that need the network are never run.
 
 ### What happens when a check fails?
 
@@ -194,7 +196,7 @@ An LSP-based extension gives the model diagnostics as it edits. pi-project-profi
 
 ### Does it work in headless or scripted π runs?
 
-Yes: `verify.headless` (default `true`) runs the gate in print/JSON/RPC modes too, and test/build tiers that would need a confirmation are skipped instead of blocking.
+Yes: `verify.headless` (default `true`) runs the gate in print/JSON/RPC modes too, and test/build tiers that would need a confirmation are skipped instead of blocking. The automatic dream never starts there: it runs only in interactive sessions.
 
 ## Links
 

@@ -3,6 +3,7 @@
  *
  *   ~/.pi/agent/project-profile/config.json        settings
  *   ~/.pi/agent/project-profile/profiles/<h>.json   detected profile + user data (overrides, notes, permissions) per repository
+ *   ~/.pi/agent/project-profile/profiles/<h>.*.lock lock files: a write in progress (`.json.lock`), an automatic dream (`.dream.lock`)
  *   ~/.pi/agent/project-profile/history/<h>.jsonl   gate history per repository (bounded, see history.ts)
  *   ~/.pi/agent/project-profile/baselines/<h>.json  pre-existing-failure baseline per repository (bounded, 3-day life)
  *   $TMPDIR/pi-project-profile/*.log                full check output (24 h, 40 files, see verify/run.ts)
@@ -11,7 +12,7 @@
  * name. `/profile storage` reports sizes; pruning (session start and `/profile storage prune`) removes
  * what nothing can use any more: files of repositories whose root is gone (unless the profile holds
  * notes or overrides: an unmounted disk is not a deleted project), baselines past their life, history
- * and profiles not visited for 120 days, and leftovers of torn writes.
+ * and profiles not visited for 120 days, and leftovers of torn writes and of lock holders that crashed.
  */
 import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -134,7 +135,7 @@ export function pruneStorage(agentDir: string, now = Date.now()): string[] {
   for (const p of list(profilesDir(agentDir))) {
     const m = mtime(p);
     if (m === undefined) continue;
-    if (p.endsWith(".tmp")) {
+    if (p.endsWith(".tmp") || p.endsWith(".lock")) {
       if (now - m > TMP_MAX_AGE_MS) rm(p);
       continue;
     }

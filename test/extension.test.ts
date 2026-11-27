@@ -8,7 +8,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { profilePath } from "../profile/store.ts";
-import { historyPath } from "../profile/history.ts";
+import { appendHistory, historyPath } from "../profile/history.ts";
 
 type Handler = (event: any, ctx: any) => any;
 
@@ -99,7 +99,7 @@ test("registration: run_checks and the two note tools, /profile and /verify, eve
   const x = await load();
   assert.deepEqual(x.tools, ["run_checks", "remember", "forget_note"]);
   assert.deepEqual(x.commands.sort(), ["profile", "verify"]);
-  for (const e of ["session_start", "session_shutdown", "before_agent_start", "tool_call", "tool_result", "agent_before_settle", "turn_end", "session_compact"]) assert.ok(x.handlers[e]?.length, e);
+  for (const e of ["session_start", "session_shutdown", "before_agent_start", "tool_call", "tool_result", "agent_before_settle", "agent_settled", "turn_end", "session_compact"]) assert.ok(x.handlers[e]?.length, e);
   x.cleanup();
 });
 
@@ -620,9 +620,142 @@ test("memory tools: remember saves an agent note with evidence, forget_note prot
   // history recorded the note events and the dreams
   const history = readFileSync(historyPath(x.agent, realpathSync(root)), "utf8").trim().split("\n").map((l) => JSON.parse(l));
   assert.equal(history.filter((e) => e.kind === "dream").length, 3);
-  assert.ok(history.some((e) => e.kind === "note" && e.action === "add" && e.by === "agent" && e.id === id));
-  assert.ok(history.some((e) => e.kind === "note" && e.action === "remove" && e.by === "agent" && e.id === userId));
+  assert.ok(history.some((e) => e.kind === "note" && e.action === "add" && e.by === "agent" && e.id === id && e.dream === undefined), "a change outside a dream is not marked");
+  assert.ok(history.some((e) => e.kind === "note" && e.action === "remove" && e.by === "agent" && e.id === userId && e.dream === true), "a change made in a dream is marked: it is no new material for the next dream");
   x.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+/** A model registry whose streamSimple answers from a script, recording each request; `hold` makes a call wait for its abort signal. */
+function fakeModels(replies: any[], opts: { hold?: boolean } = {}) {
+  const requests: Array<{ systemPrompt: string; messages: any[]; tools: string[] }> = [];
+  const modelRegistry = {
+    streamSimple: (_model: unknown, context: any, options?: { signal?: AbortSignal }) => ({
+      result: async () => {
+        requests.push({ systemPrompt: context.systemPrompt, messages: structuredClone(context.messages), tools: context.tools.map((t: { name: string }) => t.name) });
+        if (opts.hold) await new Promise((resolve) => options?.signal?.addEventListener("abort", resolve, { once: true }));
+        if (options?.signal?.aborted) return { stopReason: "aborted", content: [] };
+        return replies.shift() ?? { stopReason: "stop", content: [{ type: "text", text: "done" }] };
+      },
+    }),
+  };
+  return { requests, modelRegistry };
+}
+const toolCall = (id: string, name: string, args: Record<string, unknown>) => ({ stopReason: "toolUse", content: [{ type: "toolCall", id, name, arguments: args }] });
+
+test("automatic dream: after a run settles in an interactive session, in the background, once per session; agent notes change, user notes are only proposed", async () => {
+  const x = await load();
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "demo", scripts: { build: "tsc", test: "node --test" } }));
+  const real = realpathSync(root);
+  const models = fakeModels([]);
+  const tui = { ...x.ctxFor(root), mode: "tui", hasUI: true, model: { provider: "fake", id: "m" }, modelRegistry: models.modelRegistry };
+  await x.emit("session_start", {}, tui);
+  await x.emit("before_agent_start", prompt(), tui);
+  const remember = async (text: string) => (await x.impl["remember"]!.execute("id", { text, evidence: "seen" }, undefined, undefined, tui)).content[0]!.text.match(/\[([0-9a-f]{6})\]/)![1]!;
+  const a1 = await remember("run `npm run build` before `npm test`");
+  const a2 = await remember("tests import the build output");
+  const a3 = await remember("the test command is `npm test`");
+  await x.command("/profile note Keep the Makefile", tui);
+  const user = () => JSON.parse(readFileSync(profilePath(x.agent, real), "utf8")).user;
+  const u1 = user().notes[3].id;
+  // two earlier sessions with activity: with this one, three sessions since (no dream yet)
+  appendHistory(x.agent, real, "s1", { kind: "verdict", seq: 1, status: "green", round: 0, failed: [], known: 0, ms: 1 }, new Date(Date.now() - 2 * 86_400_000));
+  appendHistory(x.agent, real, "s2", { kind: "verdict", seq: 1, status: "green", round: 0, failed: [], known: 0, ms: 1 }, new Date(Date.now() - 86_400_000));
+  models.requests.length = 0;
+  const replies = [
+    toolCall("c1", "read", { path: "package.json" }),
+    { ...toolCall("c2", "apply_changes", { remove: [{ id: a3, reason: "the profile states the test command" }], add: [{ text: "Build before testing: the tests import the build output (`npm run build`, then `npm test`)", evidence: "package.json scripts", replaces: [a1, a2] }], propose: [{ id: u1, reason: "there is no Makefile" }] }), usage: { totalTokens: 1500, cost: { total: 0.012 } } },
+  ];
+  const scripted = fakeModels(replies);
+  const ctx = { ...tui, modelRegistry: scripted.modelRegistry };
+  await x.emit("agent_settled", { aborted: false }, ctx);
+  await until(() => x.notes.some(([, m]) => m.includes("suggests removing your note")));
+  // what the model got: the instructions, the tools, the notes, the history, the profile; then the file it read
+  assert.equal(scripted.requests.length, 2);
+  const first = scripted.requests[0]!;
+  assert.ok(first.systemPrompt.includes("You maintain the memory of a coding agent") && first.systemPrompt.includes("You cannot change any file"), first.systemPrompt);
+  assert.deepEqual(first.tools, ["read", "search", "apply_changes"]);
+  const material = first.messages[0].content as string;
+  assert.ok(material.includes(`[${a1}] (agent, `) && material.includes(`[${u1}] (user, `) && material.includes("Verification history") && material.includes("<profile>") && material.includes("test `npm test`"), material);
+  assert.ok(scripted.requests[1]!.messages.some((m) => m.role === "toolResult" && m.content[0].text.startsWith('1: {"name":"demo"')), "the read result goes back to the model");
+  // what changed: agent notes only; the merged note takes the place of the first one it replaces
+  const notes = user().notes;
+  assert.deepEqual(notes.map((n: any) => [n.by, n.text]), [["agent", "Build before testing: the tests import the build output (`npm run build`, then `npm test`)"], ["user", "Keep the Makefile"]]);
+  const merged = notes[0].id;
+  assert.ok(x.notes.some(([, m]) => m === `project-profile: the automatic dream removed [${a3}] (the profile states the test command); merged [${a1}], [${a2}] into [${merged}] (1.5k tokens, $0.01) — /profile notes lists the notes`), x.notes.map(([, m]) => m).join("\n"));
+  assert.ok(x.notes.some(([, m]) => m.includes(`your note [${u1}] “Keep the Makefile”: there is no Makefile — /profile notes rm ${u1} removes it`)));
+  // history: the dream's changes are marked, and the dream comes after them
+  const history = readFileSync(historyPath(x.agent, real), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const tail = history.slice(-5).map((e) => [e.kind, e.action, e.id, e.dream, e.auto]);
+  assert.deepEqual(tail, [["note", "remove", a3, true, undefined], ["note", "remove", a1, true, undefined], ["note", "remove", a2, true, undefined], ["note", "add", merged, true, undefined], ["dream", undefined, undefined, undefined, true]]);
+  assert.ok(!existsSync(join(x.agent, "project-profile", "profiles", `${profilePath(x.agent, real).split(/[\\/]/).pop()!.replace(".json", "")}.dream.lock`)), "the dream lock is released");
+  // the next prompt shows the new notes
+  const p = prompt();
+  await x.emit("before_agent_start", p, ctx);
+  assert.ok(p.systemPromptOptions.sections["project_profile"]!.includes(`(agent ${merged}) Build before testing`));
+  // once per session
+  await x.emit("agent_settled", { aborted: false }, ctx);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(scripted.requests.length, 2);
+  // the next session: no new material since the dream, so no dream
+  const next = await load(x.agent);
+  const later = fakeModels([]);
+  const ctx2 = { ...next.ctxFor(root), mode: "tui", hasUI: true, model: { provider: "fake", id: "m" }, modelRegistry: later.modelRegistry };
+  await next.emit("session_start", {}, ctx2);
+  await next.emit("agent_settled", { aborted: false }, ctx2);
+  await new Promise((r) => setTimeout(r, 50));
+  assert.equal(later.requests.length, 0);
+  next.cleanup();
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("automatic dream: never in print mode, in an untrusted project, without a model, with profile.autoDream off, or after an aborted run; a session that ends stops it and applies nothing", async () => {
+  const agent = tmp();
+  const root = tmp();
+  write(root, "package.json", JSON.stringify({ name: "demo" }));
+  const real = realpathSync(root);
+  const setup = async (config?: object) => {
+    if (config) {
+      mkdirSync(join(agent, "project-profile"), { recursive: true });
+      writeFileSync(join(agent, "project-profile", "config.json"), JSON.stringify(config));
+    }
+    const x = await load(agent);
+    const models = fakeModels([], { hold: true });
+    const tui = { ...x.ctxFor(root), mode: "tui", hasUI: true, model: { provider: "fake", id: "m" }, modelRegistry: models.modelRegistry };
+    await x.emit("session_start", {}, tui);
+    return { x, models, tui };
+  };
+  const { x, models, tui } = await setup();
+  await x.emit("before_agent_start", prompt(), tui);
+  await x.impl["remember"]!.execute("id", { text: "tests need `DATABASE_URL`", evidence: "ran them" }, undefined, undefined, tui);
+  for (const s of ["s1", "s2"]) appendHistory(agent, real, s, { kind: "verdict", seq: 1, status: "green", round: 0, failed: [], known: 0, ms: 1 }, new Date(Date.now() - 86_400_000));
+  const settled = async (ctx: any, aborted = false) => {
+    await x.emit("agent_settled", { aborted }, ctx);
+    await new Promise((r) => setTimeout(r, 30));
+  };
+  await settled({ ...tui, mode: "print", hasUI: false });
+  await settled({ ...tui, isProjectTrusted: () => false });
+  await settled({ ...tui, model: undefined });
+  await settled({ ...tui, modelRegistry: {} });
+  await settled(tui, true);
+  assert.equal(models.requests.length, 0, "none of these starts a dream");
+  // due and allowed: it starts; the session ends while the model is still working
+  await settled(tui);
+  assert.equal(models.requests.length, 1);
+  const lock = profilePath(agent, real).replace(/\.json$/, ".dream.lock");
+  assert.ok(existsSync(lock), "a second π process would not dream now");
+  const before = readFileSync(profilePath(agent, real), "utf8");
+  await x.emit("session_shutdown", {}, tui);
+  await until(() => !existsSync(lock));
+  assert.equal(readFileSync(profilePath(agent, real), "utf8"), before, "nothing applied");
+  assert.ok(!readFileSync(historyPath(agent, real), "utf8").includes('"dream"'), "no dream recorded: the next session tries again");
+  // profile.autoDream: false
+  const off = await setup({ profile: { autoDream: false } });
+  await off.x.emit("agent_settled", { aborted: false }, off.tui);
+  await new Promise((r) => setTimeout(r, 30));
+  assert.equal(off.models.requests.length, 0);
+  off.x.cleanup();
   rmSync(root, { recursive: true, force: true });
 });
 

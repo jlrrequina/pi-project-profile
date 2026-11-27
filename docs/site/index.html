@@ -84,7 +84,7 @@
         {
           "@type": "Question",
           "name": "Will it run my tests or builds automatically?",
-          "acceptedAnswer": { "@type": "Answer", "text": "Only after you allow it once per repository. Typecheck and lint run automatically because they are read-only. Installs, migrations, deploys and anything that needs the network are never run." }
+          "acceptedAnswer": { "@type": "Answer", "text": "Only after you allow it once per repository. Typecheck and lint run automatically because they are read-only. Installs, migrations, deploys and commands that need the network are never run." }
         },
         {
           "@type": "Question",
@@ -157,9 +157,9 @@
       <li><strong>Verify</strong> — after every turn that changed files, runs the project's own checks by tier (syntax → typecheck → lint automatically; tests and build once you allow them per repository) and sends only <em>new</em> failures back to the agent for at most three repair rounds.</li>
       <li><strong>Review</strong> — flags what a reviewer would want to know about the agent's diff: added suppressions, skipped or focused tests, stubs, loosened configs, deleted tests, secrets, unignored <code>.env</code> files, stale lockfiles.</li>
       <li><strong>Rules on demand</strong> — delivers nested <code>AGENTS.md</code> files and glob-scoped rules (Cursor, Copilot, Windsurf) when the agent first touches a file they apply to, and warns before hand-editing generated files.</li>
-      <li><strong>Memory</strong> — per-repository notes with author, date and evidence: the agent records what the files do not show with a <code>remember</code> tool, a sleep pass validates the notes against the repository at every session start, <code>/profile dream</code> has the agent consolidate them against the verification history, and the pre-existing-failure baseline survives between sessions on an unchanged tree.</li>
+      <li><strong>Memory</strong> — per-repository notes with author, date and evidence: the agent records what the files do not show with a <code>remember</code> tool, a sleep pass validates the notes against the repository at every session start, an automatic dream consolidates them in the background when they have changed (<code>/profile dream</code> starts one now), and the pre-existing-failure baseline survives between sessions on an unchanged tree.</li>
     </ul>
-    <p>Installs, migrations, deploys and anything network-bound are never run. Cache, notes, history and settings live under <code>~/.pi/agent/project-profile/</code>, size-bounded and pruned (<code>/profile storage</code>). Requires π ≥ 0.87 and Node ≥ 22.18; no runtime dependencies; MIT.</p>
+    <p>Installs, migrations, deploys and network-bound commands are never run; the only model call it starts by itself is the automatic dream (read-only tools, the agent's notes only, <code>profile.autoDream: false</code> turns it off). Cache, notes, history and settings live under <code>~/.pi/agent/project-profile/</code>, size-bounded and pruned (<code>/profile storage</code>). Requires π ≥ 0.87 and Node ≥ 22.18; no runtime dependencies; MIT.</p>
   </section>
 
   <section id="example">
@@ -204,7 +204,7 @@
         <tr><td><code>/profile set &lt;key&gt; &lt;cmd&gt;</code></td><td>override <code>typecheck</code>, <code>lint</code>, <code>test</code>, <code>build</code>, … (<code>-</code> disables, <code>default</code> removes the override)</td></tr>
         <tr><td><code>/profile tests allow|deny|ask</code></td><td>test-tier permission (same for <code>build</code>)</td></tr>
         <tr><td><code>/profile note</code> · <code>/profile notes [rm &lt;id&gt;]</code></td><td>per-repo notes for the agent: add, list with ids, remove one</td></tr>
-        <tr><td><code>/profile history</code> · <code>/profile dream</code> · <code>/profile storage</code></td><td>what the gate observed in this repo; let the agent consolidate the notes; sizes and pruning of everything stored</td></tr>
+        <tr><td><code>/profile history</code> · <code>/profile dream</code> · <code>/profile storage</code></td><td>what the gate observed in this repo; let the agent consolidate the notes now (the automatic dream does it in the background); sizes and pruning of everything stored</td></tr>
         <tr><td><code>/verify [fast|lint|test|build|all] [file…]</code></td><td>run checks now, showing every failure</td></tr>
         <tr><td><code>run_checks</code></td><td>the same, as a tool the model can call mid-task</td></tr>
         <tr><td><code>remember</code> · <code>forget_note</code></td><td>tools the model calls to save a project note with its evidence, or remove one of its own</td></tr>
@@ -220,7 +220,7 @@
     <h3>Does it change anything in my repository?</h3>
     <p>No. Detection is read-only; the cache and per-repo settings live under <code>~/.pi/agent/project-profile/</code> and logs under <code>$TMPDIR/pi-project-profile/</code>. The automatic checks are the project's own read-only commands; auto-fix commands are suggested, never run.</p>
     <h3>Will it run my tests or builds automatically?</h3>
-    <p>Only after you allow it once per repository. Typecheck and lint run automatically because they are read-only. Installs, migrations, deploys and anything that needs the network are never run.</p>
+    <p>Only after you allow it once per repository. Typecheck and lint run automatically because they are read-only. Installs, migrations, deploys and commands that need the network are never run.</p>
     <h3>What happens when a check fails?</h3>
     <p>The failing diagnostics go back to the agent, which must fix the cause — not disable the check — and end its turn; the checks re-run. After three rounds, or when a round changes nothing or repeats the same failure, the loop stops and the agent summarizes what is still failing instead of claiming success. Each follow-up asks the agent to end with a complete summary of the task, updated with the verification result, so its last message is the task's result and not a reply about a check.</p>
     <h3>Does it break prompt caching?</h3>
